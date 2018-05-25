@@ -257,13 +257,13 @@ endif
 
 ################################################################################
 
-# helpful for linking files 
+# helpful for linking files
 # devblogs.nvidia.com/separate-compilation-linking-cuda-device-code
 
 # Target rules
 all: build
 
-build: DTmask
+build: DiskTracer
 
 check.deps:
 ifeq ($(SAMPLE_ENABLED),0)
@@ -276,16 +276,16 @@ endif
 constants.o: constants.c
 	$(EXEC) $(NVCC) $(INCLUDES) $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $< -x cu -dc
 
-DTmask.o:DTmask.cu
+DiskTracer.o:DiskTracer.cu
 	$(EXEC) $(NVCC) $(INCLUDES) $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $< -dc
 
-DTmask: DTmask.o constants.o
+DiskTracer: DiskTracer.o constants.o
 	$(EXEC) $(NVCC) $(ALL_LDFLAGS) $(GENCODE_FLAGS) -o $@ $+ $(LIBRARIES)
 
 run: build
-	$(EXEC) ./DTmask
+	$(EXEC) ./DiskTracer
 
 clean:
-	rm -f DTmask DTmask.o constants.o
+	rm -f DiskTracer DiskTracer.o constants.o
 
 clobber: clean
