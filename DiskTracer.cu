@@ -61,7 +61,11 @@ vectorAdd(double *img, int numElements)
     int i_col = blockIdx.y;
     int i_row = threadIdx.x;
 
-    int index = i_vel * n_pix * n_pix + i_col * n_pix + i_row;
+    // gridDim.x = n_vel;
+    // gridDim.y = n_pix; // columns
+    // blockDim.x = n_pix; // rows
+
+    int index = i_vel * (gridDim.y * blockDim.x) + i_col * gridDim.y + i_row;
 
     if (index < numElements)
     {
@@ -125,7 +129,6 @@ int main(void)
     // Launch the Vector Add CUDA Kernel
     int threadsPerBlock = n_pix; // 128
     // int blocksPerGrid =(numElements + threadsPerBlock - 1) / threadsPerBlock;
-    int blocksPerGrid =(numElements + threadsPerBlock - 1) / threadsPerBlock;
     dim3 numBlocks(n_vel, n_pix);
     // printf("CUDA kernel launch with %d blocks of %d threads\n", blocksPerGrid, threadsPerBlock);
     vectorAdd<<<numBlocks, threadsPerBlock>>>(d_img, numElements);
