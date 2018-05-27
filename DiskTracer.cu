@@ -3,7 +3,6 @@
 // For the CUDA runtime routines (prefixed with "cuda_")
 #include <cuda_runtime.h>
 
-
 #include "constants.h"
 
 // #include <helper_cuda.h>
@@ -52,8 +51,13 @@
 // pixels per channel = n_pix * n_pix
 // if we can have 1024 threads per block, then we
 
-__global__ void
-vectorAdd(double *img, int numElements)
+__device__ square(int i)
+{
+  return i * i;
+}
+
+
+__global__ void vectorAdd(double *img, int numElements)
 {
     // int i = blockDim.x * blockIdx.x + threadIdx.x;
 
@@ -67,9 +71,14 @@ vectorAdd(double *img, int numElements)
 
     int index = i_vel * (gridDim.y * blockDim.x) + i_col * gridDim.y + i_row;
 
+
+    // verify whether the pixel should be traced
+
+
+
     if (index < numElements)
     {
-        img[index] = (double) index; // just put the index for now.
+        img[index] = (double) square(index); // just put the index for now.
     }
 }
 
@@ -85,6 +94,9 @@ int main(void)
     // print the value of a constant
     printf("M_sun is %e [g]\n", M_sun);
 
+
+    // We can use constants here, in host memory, but not on device memory.
+    // To do that, we'd need to copy them there.
 
     // Determine the size of the image, and create memory to hold it.
     int n_vel = 4;
