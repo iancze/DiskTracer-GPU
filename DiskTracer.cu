@@ -51,7 +51,7 @@
 // pixels per channel = n_pix * n_pix
 // if we can have 1024 threads per block, then we
 
-__device__ square(int i)
+__device__ int square(int i)
 {
   return i * i;
 }
