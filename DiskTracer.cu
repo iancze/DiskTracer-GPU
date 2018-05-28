@@ -799,6 +799,9 @@ __constant__ double dVels[NVEL]; // to store array of velocities
 
 // using the Texture reference API, since the GPI GPU is compute capability 5.2
 // float4 is a CUDA vector type which can be accessed by .x, .y, .z, and .w
+// it looks like only float4 is permitted in current versions of CUDA, only double2 is available.
+// Since these numbers are changing over large ranges, float is probably fine for this specific application.
+// .x = DeltaV2; .y = S_nu; .z = Upsilon_nu, .w = 0.0 (junk);
 texture<float4, cudaTextureType2D, cudaReadModeElementType> texRef;
 
 __global__ void tracePixel(double *img, int numElements) // img is the DEVICE global memory
@@ -815,12 +818,15 @@ __global__ void tracePixel(double *img, int numElements) // img is the DEVICE gl
     int index = i_vel * (gridDim.y * blockDim.x) + i_col * gridDim.y + i_row;
 
     // determine whether the pixel should be traced
-
     if (index < numElements)
     {
         // img[index] = (double) square(index); // just put the index for now.
-        img[index] = dVels[i_vel]; //dPars.M_star;
-
+        // img[index] = dVels[i_vel]; //dPars.M_star;
+        float4 ans = tex2D(texRef, 0.5, 0.5);
+        // float ans = tex2D(texRef, i_col, i_row);
+        // printf("numElements: %d, i_col: %d i_row: %d ans: %f \n", numElements, i_col, i_row, ans);
+        // printf("i_col: %d i_row: %d .x: %f .y:%f .z:%f .w:%f \n", i_col, i_row, ans.x, ans.y, ans.z, ans.w);
+        img[index] = ans.x;
         // Load from the texture using tex2D(texRef, x, y);
     }
 
@@ -871,20 +877,37 @@ int main(void)
     // Set up the texture memory for the grid interpolator.
     // this is the float4 type, right?
     cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 32, 32, 32, cudaChannelFormatKindFloat);
+    // cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);
 
     // allocate the 2D array to form the texture
     cudaArray* cuArray;
-    cudaMallocArray(&cuArary, &channelDesc, NR, NZ);
+    cudaMallocArray(&cuArray, &channelDesc, NR, NZ);
 
     // Initialize it with memory from the host
-    // cudaMemcpyToArray(cuArray, 0, 0, h_data, size, cudaMemcpyHotToDevice);
+    float4 h_data[NR][NZ];
+
+    for (int j=0; j<NZ; j++)
+    {
+      for (int i=0; i<NR; i++)
+      {
+        h_data[j][i] = make_float4(i, j, i + j, 0.0);
+        // printf("x: %f", h_data[j][i].x);
+        // printf(" y: %f", h_data[j][i].y);
+        // printf(" z: %f", h_data[j][i].z);
+        // printf(" w: %f\n", h_data[j][i].w);
+      }
+    }
+
+
+    // cudaMemcpytoArray(dArray, wOffset, hOffset, source, size, cudaMemcpyHosttoDivec)
+    cudaMemcpyToArray(cuArray, 0, 0, h_data,  NR * NZ * sizeof(float4), cudaMemcpyHostToDevice);
+    // cudaMemcpyToArray(cuArray, 0, 0, h_data,  NR * NZ * sizeof(float), cudaMemcpyHostToDevice);
 
     // texture reference parameters
-    texDesc.addressMode[0] = cudaAddressModeClamp; // clamp to (0.0, 1.0 - 1/N). cudaAddressModeBorder (send to 0.0 outside)
-    texDesc.addressMode[1] = cudaAddressModeClamp;
-    texDesc.filterMode = cudaFilterModeLinear;     // nearest neighbor: cudaFilterModePoint. cudaFilterModeLinear.
-    texDesc.readMode = cudaReadModeElementType;
-    texDesc.normalizedCoords = 1; // true
+    texRef.addressMode[0] = cudaAddressModeClamp; // clamp to (0.0, 1.0 - 1/N). cudaAddressModeBorder (send to 0.0 outside)
+    texRef.addressMode[1] = cudaAddressModeClamp;
+    texRef.filterMode = cudaFilterModeLinear;     // nearest neighbor: cudaFilterModePoint. cudaFilterModeLinear
+    texRef.normalized = true; // true
 
     // Bind the array to the texture reference
     cudaBindTextureToArray(texRef, cuArray, channelDesc);
@@ -918,7 +941,8 @@ int main(void)
     int threadsPerBlock = NPIX;
     // int blocksPerGrid =(numElements + threadsPerBlock - 1) / threadsPerBlock;
     dim3 numBlocks(NVEL, NPIX);
-    // printf("CUDA kernel launch with %d blocks of %d threads\n", blocksPerGrid, threadsPerBlock);
+    printf("CUDA kernel launch with a grid %d x %d (%d blocks) of %d threads\n", numBlocks.x, numBlocks.y, numBlocks.x * numBlocks.y, threadsPerBlock);
+    printf("numElements %d\n", numElements);
     tracePixel<<<numBlocks, threadsPerBlock>>>(d_img, numElements);
     err = cudaGetLastError();
 
@@ -940,10 +964,10 @@ int main(void)
     }
 
     // Save the results to disk using HDF5 files.
-    for (int i = 0; i < numElements; ++i)
-    {
-        printf("i=%d, h_img[%d]=%f\n", i, i, h_img[i]);
-    }
+    // for (int i = 0; i < numElements; ++i)
+    // {
+    //     printf("i=%d, h_img[%d]=%f\n", i, i, h_img[i]);
+    // }
 
     // Create the HDF5 file, overwrite if exists
     hid_t file_id;
