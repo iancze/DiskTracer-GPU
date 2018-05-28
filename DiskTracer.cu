@@ -968,7 +968,7 @@ int main(void)
 {
 
     // Calculate the appropriate constants
-    init_constants();
+    // init_constants();
 
 
     // Error code to check return values for CUDA calls
