@@ -20,7 +20,13 @@
 // Maximum extent of the image (in AU)
 #define RMAX 800.0
 
+// number of bins of the texture grid for DeltaV2, S_nu, and Upsilon_nu
+#define NR 512
+#define NZ 512
 
+// maximum extent (in AU) of the texture grid for DeltaV2, S_nu, and Upsilon_nu
+#define RMAX_interp 800.0
+#define ZMAX_interp 500.0
 
 // ***************************
 // Constants
@@ -788,6 +794,13 @@ double DeltaV2(double r, double z, struct pars * p, struct molecule * m)
 // Really need to think about reducing this to ONLY the variables and functions which need
 // to be run on the device
 
+__constant__ struct pars dPars; // to store parameters
+__constant__ double dVels[NVEL]; // to store array of velocities
+
+// using the Texture reference API, since the GPI GPU is compute capability 5.2
+// float4 is a CUDA vector type which can be accessed by .x, .y, .z, and .w
+texture<float4, cudaTextureType2D, cudaReadModeElementType> texRef;
+
 __global__ void tracePixel(double *img, int numElements) // img is the DEVICE global memory
 {
 
@@ -806,12 +819,13 @@ __global__ void tracePixel(double *img, int numElements) // img is the DEVICE gl
     if (index < numElements)
     {
         // img[index] = (double) square(index); // just put the index for now.
-        img[index] = dPars.M_star;
+        img[index] = dVels[i_vel]; //dPars.M_star;
+
+        // Load from the texture using tex2D(texRef, x, y);
     }
 
 }
 
-__constant__ struct pars dPars;
 
 // Main routine on the HOST
 int main(void)
@@ -820,17 +834,6 @@ int main(void)
     // Calculate the appropriate constants
     // init_constants();
 
-    // Calculate the velocities
-    // double dvel = (vel_end - vel_start) / (n_vel - 1);
-
-    // Create an array of velocities linearly spaced from vel_start to vel_end
-    // img.pVel = malloc(n_vel * sizeof(double));
-    // for (int i = 0; i < n_vel; i++)
-    // {
-      // img.pVel[i] = vel_start + dvel * i;
-    // }
-
-
     // Error code to check return values for CUDA calls
     cudaError_t err = cudaSuccess;
 
@@ -838,7 +841,54 @@ int main(void)
     struct pars hPars = {.M_star=1.75, .r_c=45.0, .T_10=115., .q=0.63, .gamma=1.0, .Sigma_c=7.0, .ksi=0.14, .dpc=73.0, .incl=45.0, .PA=0.0, .vel=0.0, .mu_RA=0.0, .mu_DEC=0.0};
 
     // Copy to constant memory on the device
-    cudaMemcpyToSymbol(&hPars, &dPars, sizeof(pars));
+    err = cudaMemcpyToSymbol(dPars, &hPars, sizeof(pars));
+    if (err != cudaSuccess)
+    {
+        fprintf(stderr, "Failed to copy parmeters to constant memory (error code %s)!\n", cudaGetErrorString(err));
+        exit(EXIT_FAILURE);
+    }
+
+    // Calculate the velocities
+    double hVels[NVEL];
+    // actual velocities will be read in from the data array, but NVEL must be known at compile time.
+    double vel_start = -2.0;
+    double vel_end = 2.0;
+    double dvel = (vel_end - vel_start) / (NVEL - 1.0);
+    // Create an array of velocities linearly spaced from vel_start to vel_end
+    // img.pVel = malloc(n_vel * sizeof(double));
+    for (int i = 0; i < NVEL; i++)
+    {
+      hVels[i] = vel_start + dvel * i;
+    }
+    // copy to device constant memory
+    err = cudaMemcpyToSymbol(dVels, hVels, NVEL * sizeof(double));
+    if (err != cudaSuccess)
+    {
+        fprintf(stderr, "Failed to copy velocities to constant memory (error code %s)!\n", cudaGetErrorString(err));
+        exit(EXIT_FAILURE);
+    }
+
+    // Set up the texture memory for the grid interpolator.
+    // this is the float4 type, right?
+    cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 32, 32, 32, cudaChannelFormatKindFloat);
+
+    // allocate the 2D array to form the texture
+    cudaArray* cuArray;
+    cudaMallocArray(&cuArary, &channelDesc, NR, NZ);
+
+    // Initialize it with memory from the host
+    // cudaMemcpyToArray(cuArray, 0, 0, h_data, size, cudaMemcpyHotToDevice);
+
+    // texture reference parameters
+    texDesc.addressMode[0] = cudaAddressModeClamp; // clamp to (0.0, 1.0 - 1/N). cudaAddressModeBorder (send to 0.0 outside)
+    texDesc.addressMode[1] = cudaAddressModeClamp;
+    texDesc.filterMode = cudaFilterModeLinear;     // nearest neighbor: cudaFilterModePoint. cudaFilterModeLinear.
+    texDesc.readMode = cudaReadModeElementType;
+    texDesc.normalizedCoords = 1; // true
+
+    // Bind the array to the texture reference
+    cudaBindTextureToArray(texRef, cuArray, channelDesc);
+
 
     // Determine the size of the image, and create memory to hold it, both on the host and on the device.
     int numElements = NVEL * NPIX * NPIX;
@@ -874,7 +924,7 @@ int main(void)
 
     if (err != cudaSuccess)
     {
-        fprintf(stderr, "Failed to launch vectorAdd kernel (error code %s)!\n", cudaGetErrorString(err));
+        fprintf(stderr, "Failed to launch tracePixel kernel (error code %s)!\n", cudaGetErrorString(err));
         exit(EXIT_FAILURE);
     }
 
@@ -915,6 +965,9 @@ int main(void)
     // Close up
     H5Fclose (file_id);
 
+
+    // Release the texture memory
+    cudaFreeArray(cuArray);
 
     err = cudaFree(d_img);  // Free device global memory
 
