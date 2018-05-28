@@ -272,20 +272,19 @@ else
 	@echo "Sample is ready - all dependencies have been met"
 endif
 
-
-constants.o: constants.c
-	$(EXEC) $(NVCC) $(INCLUDES) $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $< -x cu -dc
+# constants.o: constants.c
+# 	$(EXEC) $(NVCC) $(INCLUDES) $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $< -x cu -dc
 
 DiskTracer.o:DiskTracer.cu
-	$(EXEC) $(NVCC) $(INCLUDES) $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $< -dc
+	$(EXEC) $(NVCC) $(INCLUDES) $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $<
 
-DiskTracer: DiskTracer.o constants.o
+DiskTracer: DiskTracer.o
 	$(EXEC) $(NVCC) $(ALL_LDFLAGS) $(GENCODE_FLAGS) -o $@ $+ $(LIBRARIES)
 
 run: build
 	$(EXEC) ./DiskTracer
 
 clean:
-	rm -f DiskTracer DiskTracer.o constants.o
+	rm -f DiskTracer DiskTracer.o
 
 clobber: clean

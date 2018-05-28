@@ -1,11 +1,899 @@
 #include <stdio.h>
 
+// CUDA math library
+#include "math.h"
+
+// Necessary for writing the grid properties array to disk
+#include <hdf5.h>
+#include <hdf5_hl.h>
+
 // For the CUDA runtime routines (prefixed with "cuda_")
 #include <cuda_runtime.h>
 
-#include "constants.h"
+// Set up for the problem
+// Number of pix per dimension
+#define NPIX 128
+// Number of velocities
+#define NVEL 4
 
-// #include <helper_cuda.h>
+
+/*
+
+// Constants
+
+// To hold molecular constants
+// Don't need extern here, since this is a structure definition (akin to function?)
+struct molecule {
+    double X_mol; // number fraction of molecule
+    double B0; // rigid rotor constant of molecule (Hz)
+    double mu; // (e.s.u. cm) permanent dipole moment of the molecule
+    double mol_weight; // (g) molecular weight
+    double nu_0; // (Hz) central frequency of transition
+    int l; // lower level of transition
+    double T_L; // (K) temperature equivalent of energy at lower transition
+};
+
+// standard model parameters
+struct pars{
+    double M_star; // [M_sun] stellar mass
+    double r_c; // [AU] characteristic radius
+    double T_10; // [K] temperature at 10 AU
+    double q; // temperature gradient exponent
+    double gamma; // surface density gradient exponent
+    double Sigma_c; // [g/cm^2] surface density at characteristic radius
+    double ksi; // [cm s^{-1}] microturbulence
+    double dpc; //[pc] distance to system
+    double incl; // [degrees] inclination 0 deg = face on, 90 = edge on.
+    double PA; // [degrees] position angle (East of North)
+    double vel; // [km/s] systemic velocity (positive is redshift/receeding)
+    double mu_RA; // [arcsec] central offset in RA
+    double mu_DEC; //[arcsec] central offset in DEC
+};
+
+// For pre-caching geometry calculations along a ray
+struct geoPrecalc{
+  double xp2; // xp2 = xprime^2
+  double a1; // a1 = cosd(incl) * yprime
+  double a2; // a2 = sind(incl)
+  double b1; // b1 = sind(incl) * yprime
+  double b2; // b2 = cosd(incl)
+  double c1; // c1 = sqrt(G * M_star * M_sun) * sind(incl) * xprime
+  double c2; // c2 = xprime^2 + yprime^2
+};
+
+// Bounding z^prime points for tracing a ray
+struct zps{
+  double z1start;
+  double z1end;
+  double z2start;
+  double z2end;
+  bool merge;
+};
+
+// A set of cylindrical coordinates calculated along a ray
+struct coords{
+  double rcyl;
+  double z;
+  double vlos;
+};
+
+// definition of  Grid interpolation structure
+// Hosts 2D arrays which will be allocated by malloc() upon runtime
+struct grid{
+  int nr; // number of radial bins (cylindrical radius)
+  double rmax; // [cm] maximum radial extent of the disk (cylindrical radius)
+  double dr; // [cm] the physical change in r for each index
+  int nz; // number of vertical bins
+  double zmax; // [cm] maximum vertical extent of the disk
+  double dz; // [cm] the physical change in z for each index
+  double * pDeltaV2; // (nz, nr) pointer to the DeltaV2 array
+  double * pS_nu; // (nz, nr) pointer to the S_nu array
+  double * pUpsilon; // (nz, nr) pointer to the Upsilon
+};
+
+// An interpolated point of DeltaV2, S_nu, and Upsilon
+struct interp_point{
+  double DeltaV2;
+  double S_nu;
+  double Upsilon;
+};
+
+
+// An image to hold the results of the ray-tracing
+struct image{
+  int n_pix;
+  int n_vel;
+  double r_max; // maximum radial extent of image
+  double * pVel; // 1D array of velocities
+  bool * pMask; // 3D array of (velocities, ypixels, xpixels) to whether pixel is masked or not (bool/int)
+  double * pTau; // 3D array of (velocities, ypixels, xpixels) to store final tau values
+  double * pImg; // 3D array of (velocities, ypixels, xpixels) to store final intensities
+};
+
+
+double M_sun = 1.99e33; // [g]
+double AU = 1.4959787066e13; // [cm]
+double pc = 3.0856776e18; // [cm]
+double G = 6.67259e-8; // [cm3 g-1 s-2]
+double kB = 1.380658e-16; // [erg K^-1] Boltzmann constant
+double h = 6.6260755e-27; //erg s Planck constant
+double cc = 2.99792458e10; // [cm s^-1]
+
+// Conversion from degrees to radians
+// double deg = M_PI/180.; // [radians]
+
+// Used when determining the necessary number of pixels in an image, given distance. Anything below
+// 2 is not Nyquist sampled. This is currently set to 2.2 to provide a degree of oversampling.
+double nyquist_factor = 2.2;
+
+// Atomic
+double amu = 1.6605402e-24; // [g]
+
+// Molecular
+double mu_gas = 2.37; // mean molecular weight of circumstellar gas
+double m_H = 1.6733e-24; // g mass of hydrogen atom
+
+double f_12CO = 7.5e-5;
+
+// These variables will be calculated based upon f_12CO, so we're declaring them here, and computing
+// their values in init_constants()
+double X_12CO, X_13CO, X_C18O;
+
+// molecular hydrogen number ratio to gas [unitless]
+// [n_H2/n_gas] = 0.8
+double X_H2 = 0.8;
+
+double chi_12CO, chi_13CO, chi_C18O, m_CO, m_12CO, m_13CO, m_C18O;
+
+struct molecule CO12_21, CO12_32, CO13_21, CO13_32, CO18_21, CO18_32;
+
+// Simply use midpoint formula and adaptive steps to measure tau
+double TAU_THRESH = 8.0;
+
+// function to initialize molecule structures
+// Takes in a pointer to the molecule structure.
+void init_molecule(struct molecule * p, double X_mol, double B0, double mu, double mol_weight, double nu_0, int l, double T_L)
+{
+  // Access the fields of the structure
+  // -> is shorthand for (*p).X_mol, etc..
+  p->X_mol = X_mol;
+  p->B0 = B0;
+  p->mu = mu;
+  p->mol_weight = mol_weight;
+  p->nu_0 = nu_0;
+  p->l = l;
+  p->T_L = T_L;
+}
+
+void init_constants(void)
+{
+  // Using numbers from Charlie Qi
+  // Number ratios measured relative to all single H nuclei (not H2) [unitless]
+  // f_12CO = 7.5e-5;
+  X_12CO = 2.0 * f_12CO;
+  X_13CO = 1.0/69. * X_12CO;
+  X_C18O = 1.0/557. * X_12CO;
+
+  // Number ratios relative to average molecule (chi_CO)
+  // Multiply this against rho to get number of molecules
+  chi_12CO = X_H2 * X_12CO/(mu_gas * amu);
+  chi_13CO = X_H2 * X_13CO/(mu_gas * amu);
+  chi_C18O = X_H2 * X_C18O/(mu_gas * amu);
+
+  // CO
+  m_CO = 28.01 * amu; //molecular weight of CO in g
+  m_12CO = 27.9949 * amu; // [g]
+  m_13CO = 28.9983 * amu; // [g]
+  m_C18O = 29.9992 * amu; // [g]
+
+  // Use the initialization function to fill out the individual fields of the molecule.
+  init_molecule(&CO12_21, chi_12CO, 57635.96e6, 1.1011e-19, m_12CO, 230.53800000e6, 1, 5.5321);
+  init_molecule(&CO12_32, chi_12CO, 57635.96e6, 1.1011e-19, m_12CO, 345.79598990e6, 2, 16.5962);
+  init_molecule(&CO13_21, chi_13CO, 55101.01e6, 1.1046e-19, m_13CO, 220.39868420e6, 1, 5.2888);
+  init_molecule(&CO13_32, chi_13CO, 55101.01e6, 1.1046e-19, m_13CO, 330.58796530e6, 2, 15.8662);
+  init_molecule(&CO18_21, chi_C18O, 54891.42e6, 1.1079e-19, m_C18O, 219.56035410e6, 1, 5.2686);
+  init_molecule(&CO18_32, chi_C18O, 54891.42e6, 1.1079e-19, m_C18O, 329.33055250e6, 2, 15.8059);
+
+}
+
+
+// ****************************************
+// * model functions
+// ****************************************
+
+
+// Assume all inputs to these functions are in CGS units and in *cylindrical* coordinates.
+// Parametric type T allows passing individual Float64 or Vectors.
+// Alternate functions accept pars passed around, where pars is in M_star, AU, etc...
+// The Keplerian velocity assuming non-zero thickness to the disk.
+double velocity(double r, double z, double M_star)
+{
+  double a = r*r + z*z;
+  // Calculating sqrt(G * M_star / (r*r + z*z)^(3./2)) * r;
+  return sqrt(G * M_star / (a * sqrt(a))) * r;
+}
+
+// Calculate temperature in cylindrical coordinates.
+double temperature(double r, double T_10, double q)
+{
+  return T_10 * pow(r / (10. * AU), -q);
+}
+
+double temperature_pars(double r, struct pars * p)
+{
+  return temperature(r, p->T_10, p->q);
+}
+
+// Scale height, calculate in cylindrical coordinates
+double Hp(double r, double M_star, double T_10, double q) // inputs in cgs
+{
+  double temp = temperature(r, T_10, q); // [K]
+  return sqrt(kB * temp * r*r*r /(mu_gas * m_H * G * M_star)); // [cm]
+}
+
+double Hp_pars(double r, struct pars * p)
+{
+  return Hp(r, p->M_star * M_sun, p->T_10, p->q);
+}
+
+// Calculate the gas surface density using cylindrical coordinates.
+double Sigma(double r, struct pars * p)
+{
+  double r_c = p->r_c * AU;
+
+  return p->Sigma_c * pow(r/r_c, -p->gamma) * exp(-pow(r/r_c, 2. -p->gamma));
+}
+
+
+// Delivers a gas density in g/cm^3
+double rho(double r, double z, struct pars * p)
+{
+  double H = Hp_pars(r, p);
+  double S = Sigma(r, p);
+
+  // Calculate the density
+  double dens = S/(sqrt(2. * M_PI) * H) * exp(-0.5 * (z/H) * (z/H));
+
+  return dens;
+}
+
+
+// Ksi is microturbulent broadining width in units of km/s. Output of this function
+// is in cm/s for RADMC (RADMC manual, eqn 7.12)
+double microturbulence(double ksi)
+{
+  return ksi * 1.e5; // convert from km/s to cm/s
+}
+
+
+// Calculate the partition function for the temperature
+// uses Mangum and Shirley expansion
+// assumes B0 in Hz, depends on molecule
+double Z_partition(double T, struct molecule * m)
+{
+  double nugget = (h * m->B0) / (kB * T);
+  return 1./nugget + 1/3. + 1/15. * nugget + 4. * nugget*nugget / 315. + nugget*nugget*nugget / 315.;
+}
+
+// Calculate the source function. nu in Hz.
+double S_nu(double r, double z, double nu, struct pars * p)
+{
+  double T = temperature_pars(r, p);
+  return (2.0 * h * nu*nu*nu)/(cc*cc) / (exp(h * nu / (kB * T)) - 1.0);
+}
+
+
+// Calculate Upsilon, the opacity before the line profile
+double Upsilon_nu(double r, double z, double nu, struct pars * p, struct molecule * m)
+{
+  double T = temperature_pars(r, p);
+
+  // Many of the terms in Upsilon could be pre-calculated for the molecule.
+  double g_l = 2.0 * m->l + 1.0;
+
+  double n_l = m->X_mol * rho(r, z, p) * g_l * exp(-m->T_L / T) / Z_partition(T, m);
+
+  // sigma_0
+  double sigma_0 = 16.0 * M_PI * M_PI * M_PI / (h * h * cc) * (kB * m->T_L) * (m->l + 1) / (m->l * (2 * m->l + 1)) * (m->mu)*(m->mu);
+
+  // calculate Delta V
+  double DeltaV = sqrt(2.0 * kB * T / m->mol_weight + microturbulence(p->ksi)*microturbulence(p->ksi));
+
+  return n_l * sigma_0 * cc / (DeltaV * m->nu_0 * sqrt(M_PI)) * (1.0 - exp(- h * nu / (kB * T)));
+}
+
+// Calculate (Delta V)^2. Returns in cm/s.
+double DeltaV2(double r, double z, struct pars * p, struct molecule * m)
+{
+  double T = temperature_pars(r, p);
+  return 2.0 * kB * T/m->mol_weight + (p->ksi * 1.e5) * (p->ksi * 1.e5);
+}
+
+
+// Functions to compute grid objects for fast interpolation.
+// Because we will always be querying for the same rcyl, z values,
+// Return the three quantities at once.
+// Compared to the Julia version, this needs to be split up into a struct, and a function to query the struct.
+// In CUDA, this will become a texture
+
+// Store the arrays for DeltaV2, S_nu, and Upsilon_nu as arrays within the structure.
+
+// The grid structure is defined in diskTracer.h
+
+// // Initialize the structure. Return a pointer to the structure.
+// struct grid * init_grid(struct pars * p, struct molecule * m, double nu, int nr, double rmax, int nz, double zmax)
+struct grid init_grid(struct pars * p, struct molecule * m, double nu, int nr, double rmax, int nz, double zmax)
+{
+
+  double dr = rmax / (nr - 1);
+  double dz = zmax / (nz - 1);
+
+  // Allocate space for three arrays with shape (nz, nr)
+  double * pDeltaV2 = malloc(nr * nz * sizeof(double));
+  double * pS_nu = malloc(nr * nz * sizeof(double));
+  double * pUpsilon = malloc(nr * nz * sizeof(double));
+
+
+  // Using the parameters, molecule, and frequency, fill in the values for DeltaV2, S_nu, and Upsilon
+  // Loop over all the grid cells
+  double r, z;
+
+  // Index variables. i = row, j=col. k is the stride, k = i * nr +j
+  int i, j, k;
+  int start_column = 10 - 1; // This means that all columns prior to 10 will have the same value as column 10
+
+  // We'll start at the tenth column (r)
+  // Due to the way this is stored as a 2D array, i corresponds to r
+  // and j actually corresponds to z
+  // but the r dimension is the columns, and the z dimension is the rows
+  // Actual radii, columns
+
+  for (j=0; j<nz; j++){
+    for (i=0; i<start_column; i++){
+      r = start_column * dr;
+      z = j * dz;
+      k = i + nr * j; // 1D linear index
+      // printf("k1 = %d\n", k);
+      pDeltaV2[k] = DeltaV2(r, z, p, m);
+      pS_nu[k] = S_nu(r, z, nu, p);
+      pUpsilon[k] = Upsilon_nu(r, z, nu, p, m);
+    };
+
+    for (i=start_column; i<nr; i++){
+      r = i * dr;
+      z = j * dz;
+      k = nr * j + i; // 1D linear index
+      // printf("k2 = %d\n", k);
+
+      pDeltaV2[k] = DeltaV2(r, z, p, m);
+      pS_nu[k] = S_nu(r, z, nu, p);
+      pUpsilon[k] = Upsilon_nu(r, z, nu, p, m);
+      // printf("Upsilon at %f AU, %f AU is %e\n", r/AU, z/AU, pUpsilon[k]);
+    };
+  };
+
+  // return an initialized grid structure
+  struct grid myGrid = {.nr=nr, .rmax=rmax, .dr=dr, .nz=nz, .zmax=zmax, .dz=dz, .pDeltaV2=pDeltaV2, .pS_nu=pS_nu, .pUpsilon=pUpsilon};
+  return myGrid;
+}
+
+
+// Query the grid to interpolate
+// Return a struct of DeltaV2, S_nu, and Upsilon values
+// pass in pointers to DeltaV2, S_nu, and Upsilon
+
+struct interp_point interp_grid(double r, double z, struct grid * g)
+{
+  // r = i * dr;
+  // z = j * dz;
+  // k = nr * j + i; // 1D linear index
+
+  // Look up what index rcyl is in rs
+  int i = lround(r/g->dr);
+
+  // Look up what index z is in zs (assume -z = z)
+  int j = lround(fabs(z/g->dz));
+
+  struct interp_point myPoint;
+  // // myPoint = {.DeltaV2=1.0e5, .S_nu=0.0, .Upsilon=0.0};
+  // // compound literal required
+  // myPoint = (struct interp_point) {1.0e5, 0.0, 0.0};
+
+  // If either of these errored, return a large value for Delta V, and 0.0 for S_nu and Upsilon
+  if ((i >= g->nz) || ( j >= g->nr))
+  {
+    // We're outside the grid, so just put values which would signify no emission possible
+    myPoint = (struct interp_point) {.DeltaV2 = 1.0e5, .S_nu = 0.0, .Upsilon = 0.0};
+  }
+  else
+  {
+    // Calculate 1D index k based upon i, j, and g->nr, g->nz.
+    int k = i + g->nr * j;
+
+    // Actually query the grid
+    myPoint = (struct interp_point) {.DeltaV2 = g->pDeltaV2[k], .S_nu = g->pS_nu[k], .Upsilon = g->pUpsilon[k]};
+  }
+
+  // Return these values in a struct for easy use
+  return myPoint;
+}
+
+// Write the 2D grids to an HDF5 file on disk
+int write_grid(struct grid * g)
+{
+  // Create the HDF5 file, overwrite if exists
+  hid_t file_id;
+
+  // We're generally storing 2D arrays
+  hsize_t dims[2] = {g->nz,g->nr};
+
+  // Create the file ID
+  file_id = H5Fcreate("grid.h5", H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+
+  // Create the double datasets within the file using the H5 Lite interface
+  H5LTmake_dataset(file_id, "/DeltaV2", 2, dims, H5T_NATIVE_DOUBLE, g->pDeltaV2);
+  H5LTmake_dataset(file_id, "/S_nu", 2, dims, H5T_NATIVE_DOUBLE, g->pDeltaV2);
+  H5LTmake_dataset(file_id, "/Upsilon", 2, dims, H5T_NATIVE_DOUBLE, g->pUpsilon);
+
+  // Close up
+  H5Fclose (file_id);
+
+  return 0;
+}
+
+int free_grid(struct grid * g)
+{
+  // free the malloc'ed arrays
+  free(g->pDeltaV2);
+  free(g->pS_nu);
+  free(g->pUpsilon);
+
+  return 0;
+}
+
+
+// ****************************************
+// * geometry functions
+// ****************************************
+
+
+// Precalculate the quantities necessary to make repeated calls to `get_r_cyl`, `get_z`, and `get_vlos` efficient.
+struct geoPrecalc get_geoPrecalc(double xprime, double yprime, struct pars * p)
+{
+
+  // Initialize an empty struct
+  struct geoPrecalc temp = {};
+
+  // For get_r_cyl
+  temp.xp2 = xprime * xprime;
+  temp.a1 = cos(p->incl * deg) * yprime;
+  temp.a2 = sin(p->incl * deg);
+  // r_cyl = sqrt(xp2 + (a1 - a2 * zprime)^2)
+
+  // For get_z
+  temp.b1 = sin(p->incl * deg) * yprime;
+  temp.b2 = cos(p->incl * deg);
+  // z = b1 + b2 * zprime
+
+  // For get_vlos
+  temp.c1 = sqrt(G * p->M_star * M_sun) * sin(p->incl * deg) * xprime;
+  temp.c2 = xprime * xprime + yprime * yprime;
+  // vlos = c1 /(c2 + zprime^2)^(3/4.)
+
+  return temp;
+}
+
+// Take a cartesian point in the sky plane and get the cylindrical radius of the disk
+// Useful for querying the disk structure or velocity field.
+// assumes i is in degrees
+double get_r_cyl(double xprime, double yprime, double zprime, double i)
+{
+  double temp = (cos(i * deg) * yprime - sin(i * deg) * zprime);
+  return sqrt(xprime * xprime + temp*temp);
+}
+
+// Take a cartesian point in the sky plane and get the cylindrical z point in the disk
+// assumes i is in degrees
+double get_z(double xprime, double yprime, double zprime, double i)
+{
+  return sin(i * deg) * yprime + cos(i * deg) * zprime;
+}
+
+// Take a cartesian point in the sky plane and get the line of sight velocity.
+// Negative velocity implies a blueshift (towards the observer).
+double get_vlos(double xprime, double yprime, double zprime, struct pars * p)
+{
+  // According to NVIDIA best practices guide, pg. 50, k^(3/4) can be rewritten as r = sqrt(k); r = r * sqrt(r)
+  double temp, k = xprime*xprime + yprime*yprime + zprime*zprime;
+  temp = sqrt(k);
+  temp = temp * sqrt(temp);
+  // temp = (xprime*xprime + yprime*yprime + zprime*zprime)^(3/4.)
+  return sqrt(G * p->M_star * M_sun) * sin(p->incl * deg) * xprime / temp;
+
+}
+
+// get_coords is a function to return the necessary rcyl, z, vlos quickly along a given ray.
+struct coords get_coords(double zprime, struct geoPrecalc gcalc)
+{
+  // Empty temp struct
+  struct coords temp = {};
+
+  double t_rcyl = (gcalc.a1 - gcalc.a2 * zprime);
+  temp.rcyl = sqrt(gcalc.xp2 + t_rcyl*t_rcyl);
+
+  temp.z = gcalc.b1 + gcalc.b2 * zprime;
+
+  //vlos = gcalc.c1 / (gcalc.c2 + zprime^2)^(3./4);
+  // k^(3/4) can be rewritten as r = sqrt(k); r = r * sqrt(r)
+  double t_vlos =  sqrt(gcalc.c2 + zprime*zprime);
+  t_vlos = t_vlos * sqrt(t_vlos);
+  temp.vlos = gcalc.c1 / t_vlos;
+
+  return temp;
+}
+
+// Return true if the pixel should be traced (or at least not immediately rejected).
+// Valid for all pixels with this same xprime value.
+bool verify_pixel_x(double xprime, struct pars * p, double v0, double DeltaVmax)
+{
+  double vb_min = (v0 - 3.0 * DeltaVmax) * 1.0e5; // convert from km/s to cm/s
+  double vb_max = (v0 + 3.0 * DeltaVmax) * 1.0e5; // convert from km/s to cm/s
+
+  return ((xprime * sin(p->incl * deg)/vb_min) >= 0.0) || ((xprime * sin(p->incl * deg)/vb_max) >= 0.0);
+}
+
+// Verify whether a given pixel has any any emitting regions. Assumes xprime, yprime, and rmax are in cm. The velocity
+// equivalent to the frequency to be traced is given by v0 [km/s]. DeltaVmax is also in km/s.
+//
+// rmax2 is the maximum disk radius squared, in [cm^2].
+// Returns a bool true/false
+bool verify_pixel(double xprime, double yprime, struct pars * p, double v0, double DeltaVmax, double rmax2)
+{
+  double vb_min = (v0 - 3.0 * DeltaVmax) * 1.0e5; // convert from km/s to cm/s
+  double vb_max = (v0 + 3.0 * DeltaVmax) * 1.0e5; // convert from km/s to cm/s
+
+  double rho2 = xprime*xprime + yprime*yprime;
+
+  if (rho2 > rmax2) return false;
+
+  bool overlap = (vb_min < 0.0) & (vb_max > 0.0);
+
+  if (xprime > 0.0) {
+      if (vb_max < 0.0)
+        return false;
+      else if (overlap)
+        return true;
+      else {
+        // Calculate (xprime * sqrt(G * pars.M_star * M_sun) * sin(p.incl * deg) / vb_min)^(4/3)
+        double temp = xprime * sqrt(G * p->M_star * M_sun) * sin(p->incl * deg) / vb_min;
+        // k^(4/3) can be written as r = x * cbrt(x)
+        return rho2 <= (temp * cbrt(temp));
+      }
+  }
+  else if (xprime < 0.0) {
+      if (vb_min > 0.0)
+        return false;
+      else if (overlap)
+        return true;
+      else {
+        // Calculate (xprime * sqrt(G * pars.M_star * M_sun) * sin(p.incl * deg) / vb_max)^(4/3)
+        double temp = xprime * sqrt(G * p->M_star * M_sun) * sin(p->incl * deg) / vb_max;
+        // k^(4/3) can be written as r = x * cbrt(x)
+        return rho2 <= (temp * cbrt(temp));
+      }
+  }
+  else return true;
+}
+
+
+// Helper function to better calculate the 4/3 power (four thirds power => ftp) and reduce clutter
+double ftp(double t, double v)
+{
+  // (t/v)^(4/3.)
+  // according to NVIDIA developers guide, this is best carried out by
+  // r = x * cbrt(x);
+  double temp = t/v;
+  return temp * cbrt(temp);
+}
+
+
+// Get the starting and ending bounding regions on zprime, based only upon the kinematic/geometrical constraints.
+// Assumes xprime, yprime, and rmax are in cm. The velocity equivalent to the frequency to be traced is given by v0
+// [km/s]. DeltaVmax is the maximum velocity expected along the ray, also in km/s.
+struct zps get_bounding_zps(double xprime, double yprime, struct pars * p, double v0, double DeltaVmax, double rmax)
+{
+
+  // Initialize all to 0
+  struct zps myZps = {};
+
+  // The three-sigma bounds on the line profile
+  double vb_min = (v0 - 3.0 * DeltaVmax) * 1.e5; // convert from km/s to cm/s
+  double vb_max = (v0 + 3.0 * DeltaVmax) * 1.e5; // convert from km/s to cm/s
+
+  // Basically, we can't be larger or smaller than this.
+  double v_temp = xprime*xprime + yprime*yprime;
+  // to find x^(3/4) do r = sqrt(x); r = r * sqrt(r)
+  v_temp = sqrt(v_temp);
+  v_temp = v_temp * sqrt(v_temp);
+  // v_temp = (xprime^2 + yprime^2)^(3./4)
+  double vb_crit = xprime * sqrt(G * p->M_star * M_sun) * sin(p->incl * deg)/v_temp;
+
+  // We want to assert that this pixel has already fulfilled the zeroth order check that there will be emission
+  // @assert (((xprime >= 0.0) & (vb_max >= 0.0)) | ((xprime <= 0.0) & (vb_min <= 0.0))) "Pixel $xprime, $yprime, will have no emission."
+
+  // There exists a vb=0 velocity, so the best we can say is that z1start and z2end starts and end at (rmax, -rmax),
+  // respectively
+  bool overlap = (vb_min <= 0.0) && (vb_max >= 0.0);
+
+  // The velocity where the ray intersects the plane of the sky (z^\prime = 0) exists between vb_min and vb_max
+  // This means that the two separate bounding regions merge into one.
+  bool overlap_crit = (vb_crit > vb_min) && (vb_crit < vb_max);
+
+  double xxyy = xprime*xprime + yprime*yprime;
+  double t1 = xprime * sqrt(G * p->M_star * M_sun) * sin(p->incl * deg);
+
+  if ((xprime >= 0.0) & (vb_max >= 0.0))
+  {
+    if (overlap)
+    {
+      myZps.z1start = rmax;
+      myZps.z2end = -rmax;
+    }
+    else if (vb_min >= 0.0)
+    {
+      myZps.z1start = sqrt(ftp(t1, vb_min) - xxyy);
+      myZps.z2end = -sqrt(ftp(t1, vb_min) - xxyy);
+    }
+    if (overlap_crit)
+    {
+      // There exists a vb within the range of vbs which yields zprime = 0, so the two regions merge.
+      myZps.z1end = 0.0;
+      myZps.z2start = 0.0;
+      myZps.merge = true;
+      return myZps;
+    }
+    else
+    {
+      myZps.z1end = sqrt(ftp(t1, vb_max) - xxyy);
+      myZps.z2start = -sqrt(ftp(t1, vb_max) - xxyy);
+    }
+  }
+  else if ((xprime <= 0.0) & (vb_min <= 0.0))
+  {
+    if (overlap)
+    {
+      myZps.z1start = rmax;
+      myZps.z2end = -rmax;
+    }
+    else if (vb_max <= 0.0)
+    {
+      myZps.z1start = sqrt(ftp(t1, vb_max) - xxyy);
+      myZps.z2end = -sqrt(ftp(t1, vb_max) - xxyy);
+    }
+
+    if (overlap_crit)
+    {
+      // There exists a vb within the range of vbs which yields zprime = 0, so the two regions merge.
+      myZps.z1end = 0.0;
+      myZps.z2start = 0.0;
+      myZps.merge = true;
+      return myZps;
+    }
+    else
+    {
+      myZps.z1end = sqrt(ftp(t1, vb_min) - xxyy);
+      myZps.z2start = -sqrt(ftp(t1, vb_min) - xxyy);
+    }
+  }
+  // Return all 4, initialized.
+  myZps.merge = false;
+  return myZps;
+}
+
+
+// ****************************************
+// * Trace functions
+// ****************************************
+
+
+// Create and return an image struct
+struct image init_img(int n_pix,  double r_max, int n_vel, double vel_start, double vel_end)
+{
+  struct image img = {};
+  img.n_pix = n_pix;
+  img.r_max = r_max;
+  img.n_vel = n_vel;
+
+  double dvel = (vel_end - vel_start) / (n_vel - 1);
+
+  // Create an array of velocities linearly spaced from vel_start to vel_end
+  img.pVel = malloc(n_vel * sizeof(double));
+  for (int i = 0; i < n_vel; i++)
+  {
+    img.pVel[i] = vel_start + dvel * i;
+  }
+
+  // Create a 3D image of bools to store the masks
+  // Initialize it all to false (0)
+  img.pMask = malloc(n_pix * n_pix * n_vel * sizeof(bool));
+  for (int i = 0; i < n_pix * n_pix * n_vel; i++)
+  {
+    img.pMask[i] = false;
+  }
+
+  // Create a 3D image initialized to zeros to store the tau values
+  img.pTau = calloc(n_pix * n_pix * n_vel, sizeof(double));
+
+  // Create a 3D image initialized to zeros to store the intensities
+  img.pImg = calloc(n_pix * n_pix * n_vel, sizeof(double));
+
+  return img;
+}
+
+
+// Write the grid to an HDF5 file grid.h5
+int write_img(struct image * img)
+{
+  // Create the HDF5 file, overwrite if exists
+  hid_t file_id;
+
+  // We're storing a 1D array as the frequencies
+  hsize_t dims_vel[1] = {img->n_vel};
+  // We're storing a 3D array as the image
+  hsize_t dims_img[3] = {img->n_vel, img->n_pix,img->n_pix};
+
+  // Create the file ID
+  file_id = H5Fcreate("img.h5", H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+
+  // Create the double datasets within the file using the H5 Lite interface
+  H5LTmake_dataset(file_id, "/vels", 1, dims_vel, H5T_NATIVE_DOUBLE, img->pVel);
+  H5LTmake_dataset(file_id, "/mask", 3, dims_img, H5T_NATIVE_CHAR, img->pMask);
+  H5LTmake_dataset(file_id, "/tau", 3, dims_img, H5T_NATIVE_DOUBLE, img->pTau);
+  H5LTmake_dataset(file_id, "/img", 3, dims_img, H5T_NATIVE_DOUBLE, img->pImg);
+
+  // Close up
+  H5Fclose (file_id);
+
+  return 0;
+}
+
+int free_img(struct image * img)
+{
+  // free the malloc'ed arrays
+  free(img->pVel);
+  free(img->pMask);
+  free(img->pTau);
+  free(img->pImg);
+
+  return 0;
+}
+
+
+
+// Adaptive stepper using Midpoint Method. https://en.wikipedia.org/wiki/Midpoint_method
+void integrate_tau(double zstart, double zend, double v0, struct pars * p, struct grid * g, struct geoPrecalc gpre, double h_tau, double tau_start, double intensity_start, double max_ds, double * end_tau, double * end_I)
+{
+
+  // @assert max_ds < 0 "max_ds must be a negative number, since the ray is traced along -z"
+
+  double tot_intensity = intensity_start;
+  double zp = zstart;
+  double tau = tau_start;
+
+  // Write in coordinate conversions for querying alpha and sfunc
+  struct coords myCoords = get_coords(zp, gpre);
+
+
+  // Calculate Delta v at this position
+  double Deltav = v0 * 1.e5 - myCoords.vlos;
+
+  // Look up RT quantities from nearest-neighbor interp.
+  struct interp_point point = interp_grid(myCoords.rcyl, myCoords.z, g);
+
+  // Evaluate alpha at current zstart position
+  double alpha = point.Upsilon * exp(-Deltav*Deltav/point.DeltaV2);
+
+  // Midpoint
+  double zp2 = 0.0;
+  double h;
+
+  double expOld = exp(-tau);
+  double expNew = exp(-tau);
+
+  while ((tau < TAU_THRESH) && (zp > zend))
+  {
+      // Based upon current alpha value, calculate how much of a dz we would need to get dz * alpha = h_tau
+      // Because these are negative numbers, the smaller step is actually the maximum (closer to 0)
+      h = fmax(-h_tau / alpha, max_ds);
+
+      // Midpoint step position
+      zp2 = zp + 0.5 * h;
+
+      // Get the necessary coordinates for querying the grid.
+      myCoords = get_coords(zp2, gpre);
+
+      // Calculate Delta v at this position
+      Deltav = v0 * 1.e5 - myCoords.vlos;
+
+      // Look up RT quantities from nearest-neighbor interp, evaluated at the midpoint
+      point = interp_grid(myCoords.rcyl, myCoords.z, g);
+
+      alpha = point.Upsilon * exp(-Deltav*Deltav/point.DeltaV2); // Calculate alpha at new midpoint location
+
+      zp += h; // Update current z position
+
+      // Use the midpoint formula to integrate tau
+      // dtau = - alpha * dzp
+      // tau_(n+1) = tau_n + dzp * alpha(zp_n + h/2)
+      // since we have a simple ODE, explicit and implicit techniques are the same.
+      tau += -h * alpha; // Update tau, remembering h is negative
+
+      expNew = exp(-tau); // Update exp
+
+      // Use the formal solution to calculate the emission coming from this cell, assuming the source function
+      // is constant over the cell
+      tot_intensity += point.S_nu * (expOld - expNew);
+
+      expOld = expNew; //replace expOld with updated tau
+  }
+
+  // Update the return values using pointers.
+  *end_tau = tau;
+  *end_I = tot_intensity;
+
+}
+
+
+// v0 is the central velocity of the channel, relative to the disk systemic velocity
+// Do the pre-calculations necessary to call integrate_tau
+void trace_pixel(double xprime, double yprime, double v0, struct pars * p, double DeltaVmax, struct grid * g, double * end_tau, double * end_I)
+{
+
+  double rmax = 700.0 * AU;
+
+  // Based on the radius of the midplane crossing, estimate a safe dtmax
+  // Assume that this has a floor of 0.2 AU.
+  double rcyl_min = fabs(xprime) + 0.2 * AU;
+
+  // we want the zprime that corresponds to the midplane crossing
+  double zprime_midplane = -tan(p->incl * deg) * yprime;
+
+  // Calculate the rcyl_mid here
+  // Corresponds to r_cyl_mid, 0.0
+  double t1 = (cos(p->incl * deg) * yprime + sin(p->incl * deg) * zprime_midplane);
+  double rcyl_mid = sqrt(xprime*xprime + t1 * t1);
+
+  // Get amplitude at midplane crossing
+  // Get scale height at rcyl_min (will be an underestimate)
+  double H_rcyl_min = Hp_pars(rcyl_min, p);
+  double H_rcyl_mid = Hp_pars(rcyl_mid, p);
+
+  double sigma_Upsilon = 0.5 * (H_rcyl_min + H_rcyl_mid)  / cos(p->incl * deg);
+  double max_ds = -sigma_Upsilon / 2.0;
+
+  // Calculate the bounding positions for emission
+  // If it's two, just trace it.
+  // If it's four, break it up into two integrals.
+  struct zps myZps =  get_bounding_zps(xprime, yprime, p, v0, DeltaVmax, rmax);
+
+  struct geoPrecalc gpre = get_geoPrecalc(xprime, yprime, p);
+
+  if (myZps.merge)
+  {
+    integrate_tau(myZps.z1start, myZps.z2end, v0, p, g, gpre, 0.1, 0.0, 0.0, max_ds, end_tau, end_I);
+  }
+  else
+  {
+    integrate_tau(myZps.z1start, myZps.z1end, v0, p, g, gpre, 0.1, 0.0, 0.0, max_ds, end_tau, end_I);
+    if (*end_tau < TAU_THRESH)
+    {
+      integrate_tau(myZps.z2start, myZps.z2end, v0, p, g, gpre, 0.1, *end_tau, *end_I, max_ds, end_tau, end_I);
+    }
+  }
+}
+
+
+*/
 
 // Define constants as constant memory.
 // __constant__ double or something
@@ -51,15 +939,9 @@
 // pixels per channel = n_pix * n_pix
 // if we can have 1024 threads per block, then we
 
-__device__ int square(int i)
-{
-  return i * i;
-}
 
-
-__global__ void vectorAdd(double *img, int numElements)
+__global__ void tracePixel(double *img, int numElements) // img is the DEVICE global memory
 {
-    // int i = blockDim.x * blockIdx.x + threadIdx.x;
 
     int i_vel = blockIdx.x;
     int i_col = blockIdx.y;
@@ -71,79 +953,57 @@ __global__ void vectorAdd(double *img, int numElements)
 
     int index = i_vel * (gridDim.y * blockDim.x) + i_col * gridDim.y + i_row;
 
-
-    // verify whether the pixel should be traced
-
-
+    // determine whether the pixel should be traced
 
     if (index < numElements)
     {
-        img[index] = (double) square(index); // just put the index for now.
+        // img[index] = (double) square(index); // just put the index for now.
+        img[index] = 1.0;
     }
+
 }
 
-/**
- * Host main routine
- */
+// Main routine on the HOST
 int main(void)
 {
+
+    // Calculate the appropriate constants
+    init_constants();
+
+
     // Error code to check return values for CUDA calls
     cudaError_t err = cudaSuccess;
 
-    init_constants();
-    // print the value of a constant
-    printf("M_sun is %e [g]\n", M_sun);
-
-
-    // We can use constants here, in host memory, but not on device memory.
-    // To do that, we'd need to copy them there.
-
-    // Determine the size of the image, and create memory to hold it.
-    int n_vel = 4;
-    int n_pix = 128;
-
-    int numElements = n_vel * n_pix * n_pix;
-
+    // Determine the size of the image, and create memory to hold it, both on the host and on the device.
+    int numElements = NVEL * NPIX * NPIX;
     size_t size = numElements * sizeof(double);
 
-    // Allocate the host image memory
+    // HOST image memory allocation
     double *h_img = (double *)malloc(size);
 
     // Verify that allocations succeeded
     if (h_img == NULL)
     {
-        fprintf(stderr, "Failed to allocate host image memory!\n");
+        fprintf(stderr, "Failed to allocate memory for the image on the host!\n");
         exit(EXIT_FAILURE);
     }
 
-
-    // Allocate the device image memory
+    // DEVICE image memory allocation
     double *d_img = NULL;
     err = cudaMalloc((void **)&d_img, size);
 
     if (err != cudaSuccess)
     {
-        fprintf(stderr, "Failed to allocate device image (error code %s)!\n", cudaGetErrorString(err));
+        fprintf(stderr, "Failed to allocate memory for the image on the device (error code %s)!\n", cudaGetErrorString(err));
         exit(EXIT_FAILURE);
     }
 
-
-    // A maximum of 65,000 can be called in each dimension.
-    // For us, this is 256 x 256
-    // So, most grids will be need to be id.x, id.y,
-
-    // number of blocks in a single launch is limited to 65,535
-    // neither dimension of a grid can exceed 65,535
-
-    // a thread block can contain up to 1024 threads.
-    // a kernel can be executed by multiple equally-shaped thread blocks, e.g., a grid
-
     // Launch the Vector Add CUDA Kernel
-    int threadsPerBlock = n_pix; // 128
+    int threadsPerBlock = NPIX;
     // int blocksPerGrid =(numElements + threadsPerBlock - 1) / threadsPerBlock;
-    dim3 numBlocks(n_vel, n_pix);
+    dim3 numBlocks(NVEL, NPIX);
     // printf("CUDA kernel launch with %d blocks of %d threads\n", blocksPerGrid, threadsPerBlock);
-    vectorAdd<<<numBlocks, threadsPerBlock>>>(d_img, numElements);
+    tracePixel<<<numBlocks, threadsPerBlock>>>(d_img, numElements);
     err = cudaGetLastError();
 
     if (err != cudaSuccess)
@@ -152,8 +1012,9 @@ int main(void)
         exit(EXIT_FAILURE);
     }
 
-    // Copy the device result vector in device memory to the host result vector in host memory.
+    // Copy the resulting image in device memory to the host memory.
     printf("Copy output data from the CUDA device to the host memory\n");
+    // This call requires the kernels to have finished executing, so it's OK.
     err = cudaMemcpy(h_img, d_img, size, cudaMemcpyDeviceToHost);
 
     if (err != cudaSuccess)
@@ -162,14 +1023,34 @@ int main(void)
         exit(EXIT_FAILURE);
     }
 
-    // Print the results
+    // Save the results to disk using HDF5 files.
     for (int i = 0; i < numElements; ++i)
     {
         printf("i=%d, h_img[%d]=%f\n", i, i, h_img[i]);
     }
 
-    // Free device global memory
-    err = cudaFree(d_img);
+    // Create the HDF5 file, overwrite if exists
+    hid_t file_id;
+
+    // We're storing a 1D array as the frequencies
+    // hsize_t dims_vel[1] = {NVEL};
+    // We're storing a 3D array as the image
+    hsize_t dims_img[3] = {NVEL, NPIX, NPIX};
+
+    // Create the file ID
+    file_id = H5Fcreate("img.h5", H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+
+    // Create the double datasets within the file using the H5 Lite interface
+    // H5LTmake_dataset(file_id, "/vels", 1, dims_vel, H5T_NATIVE_DOUBLE, img->pVel);
+    // H5LTmake_dataset(file_id, "/mask", 3, dims_img, H5T_NATIVE_CHAR, img->pMask);
+    // H5LTmake_dataset(file_id, "/tau", 3, dims_img, H5T_NATIVE_DOUBLE, img->pTau);
+    H5LTmake_dataset(file_id, "/img", 3, dims_img, H5T_NATIVE_DOUBLE, h_img);
+
+    // Close up
+    H5Fclose (file_id);
+
+
+    err = cudaFree(d_img);  // Free device global memory
 
     if (err != cudaSuccess)
     {
@@ -178,9 +1059,8 @@ int main(void)
     }
 
 
-    // Free host memory
-    free(h_img);
 
-    printf("Done\n");
+    free(h_img); // Free host memory
+
     return 0;
 }
