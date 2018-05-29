@@ -287,4 +287,10 @@ run: build
 clean:
 	rm -f DiskTracer DiskTracer.o
 
+img.h5:
+	$(EXEC) ./DiskTracer
+
+image.png: img.h5 plot_image.py
+	python3 plot_image.py
+
 clobber: clean

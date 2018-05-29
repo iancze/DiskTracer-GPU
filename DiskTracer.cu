@@ -15,7 +15,7 @@
 // Number of pix per dimension
 #define NPIX 128
 // Number of velocities
-#define NVEL 4
+#define NVEL 8
 
 // Maximum extent of the image (in AU)
 #define RMAX 800.0
@@ -27,6 +27,9 @@
 // maximum extent (in AU) of the texture grid for DeltaV2, S_nu, and Upsilon_nu
 #define RMAX_interp 800.0
 #define ZMAX_interp 500.0
+
+// Radius Column for when things start
+#define START_COLUMN 16
 
 // ***************************
 // Constants
@@ -109,16 +112,13 @@ struct interp_point{
 };
 
 
-double M_sun = 1.99e33; // [g]
-double AU = 1.4959787066e13; // [cm]
+__managed__ double M_sun = 1.99e33; // [g]
+__managed__ double AU = 1.4959787066e13; // [cm]
 double pc = 3.0856776e18; // [cm]
-double G = 6.67259e-8; // [cm3 g-1 s-2]
+__managed__ double G = 6.67259e-8; // [cm3 g-1 s-2]
 double kB = 1.380658e-16; // [erg K^-1] Boltzmann constant
 double h = 6.6260755e-27; //erg s Planck constant
 double cc = 2.99792458e10; // [cm s^-1]
-
-// Conversion from degrees to radians
-// double deg = M_PI/180.; // [radians]
 
 // Used when determining the necessary number of pixels in an image, given distance. Anything below
 // 2 is not Nyquist sampled. This is currently set to 2.2 to provide a degree of oversampling.
@@ -150,18 +150,18 @@ double TAU_THRESH = 8.0;
 
 // function to initialize molecule structures
 // Takes in a pointer to the molecule structure.
-// void init_molecule(struct molecule * p, double X_mol, double B0, double mu, double mol_weight, double nu_0, int l, double T_L)
-// {
-//   // Access the fields of the structure
-//   // -> is shorthand for (*p).X_mol, etc..
-//   p->X_mol = X_mol;
-//   p->B0 = B0;
-//   p->mu = mu;
-//   p->mol_weight = mol_weight;
-//   p->nu_0 = nu_0;
-//   p->l = l;
-//   p->T_L = T_L;
-// }
+void init_molecule(struct molecule * m, double X_mol, double B0, double mu, double mol_weight, double nu_0, int l, double T_L)
+{
+  // Access the fields of the structure
+  // -> is shorthand for (*p).X_mol, etc..
+  m->X_mol = X_mol;
+  m->B0 = B0;
+  m->mu = mu;
+  m->mol_weight = mol_weight;
+  m->nu_0 = nu_0;
+  m->l = l;
+  m->T_L = T_L;
+}
 
 void init_constants(void)
 {
@@ -185,12 +185,12 @@ void init_constants(void)
   m_C18O = 29.9992 * amu; // [g]
 
   // Use the initialization function to fill out the individual fields of the molecule.
-  // init_molecule(&CO12_21, chi_12CO, 57635.96e6, 1.1011e-19, m_12CO, 230.53800000e6, 1, 5.5321);
-  // init_molecule(&CO12_32, chi_12CO, 57635.96e6, 1.1011e-19, m_12CO, 345.79598990e6, 2, 16.5962);
-  // init_molecule(&CO13_21, chi_13CO, 55101.01e6, 1.1046e-19, m_13CO, 220.39868420e6, 1, 5.2888);
-  // init_molecule(&CO13_32, chi_13CO, 55101.01e6, 1.1046e-19, m_13CO, 330.58796530e6, 2, 15.8662);
-  // init_molecule(&CO18_21, chi_C18O, 54891.42e6, 1.1079e-19, m_C18O, 219.56035410e6, 1, 5.2686);
-  // init_molecule(&CO18_32, chi_C18O, 54891.42e6, 1.1079e-19, m_C18O, 329.33055250e6, 2, 15.8059);
+  init_molecule(&CO12_21, chi_12CO, 57635.96e6, 1.1011e-19, m_12CO, 230.53800000e6, 1, 5.5321);
+  init_molecule(&CO12_32, chi_12CO, 57635.96e6, 1.1011e-19, m_12CO, 345.79598990e6, 2, 16.5962);
+  init_molecule(&CO13_21, chi_13CO, 55101.01e6, 1.1046e-19, m_13CO, 220.39868420e6, 1, 5.2888);
+  init_molecule(&CO13_32, chi_13CO, 55101.01e6, 1.1046e-19, m_13CO, 330.58796530e6, 2, 15.8662);
+  init_molecule(&CO18_21, chi_C18O, 54891.42e6, 1.1079e-19, m_C18O, 219.56035410e6, 1, 5.2686);
+  init_molecule(&CO18_32, chi_C18O, 54891.42e6, 1.1079e-19, m_C18O, 329.33055250e6, 2, 15.8059);
 
 }
 
@@ -204,14 +204,14 @@ void init_constants(void)
 // Parametric type T allows passing individual Float64 or Vectors.
 // Alternate functions accept pars passed around, where pars is in M_star, AU, etc...
 // The Keplerian velocity assuming non-zero thickness to the disk.
-double velocity(double r, double z, double M_star)
-{
-  double a = r*r + z*z;
-  // Calculating sqrt(G * M_star / (r*r + z*z)^(3./2)) * r;
-  return sqrt(G * M_star / (a * sqrt(a))) * r;
-}
-
-// Calculate temperature in cylindrical coordinates.
+// double velocity(double r, double z, double M_star)
+// {
+//   double a = r*r + z*z;
+//   // Calculating sqrt(G * M_star / (r*r + z*z)^(3./2)) * r;
+//   return sqrt(G * M_star / (a * sqrt(a))) * r;
+// }
+//
+// // Calculate temperature in cylindrical coordinates.
 double temperature(double r, double T_10, double q)
 {
   return T_10 * pow(r / (10. * AU), -q);
@@ -221,85 +221,85 @@ double temperature_pars(double r, struct pars * p)
 {
   return temperature(r, p->T_10, p->q);
 }
-
-// Scale height, calculate in cylindrical coordinates
-double Hp(double r, double M_star, double T_10, double q) // inputs in cgs
-{
-  double temp = temperature(r, T_10, q); // [K]
-  return sqrt(kB * temp * r*r*r /(mu_gas * m_H * G * M_star)); // [cm]
-}
-
-double Hp_pars(double r, struct pars * p)
-{
-  return Hp(r, p->M_star * M_sun, p->T_10, p->q);
-}
-
-// Calculate the gas surface density using cylindrical coordinates.
-double Sigma(double r, struct pars * p)
-{
-  double r_c = p->r_c * AU;
-
-  return p->Sigma_c * pow(r/r_c, -p->gamma) * exp(-pow(r/r_c, 2. -p->gamma));
-}
-
-
-// Delivers a gas density in g/cm^3
-double rho(double r, double z, struct pars * p)
-{
-  double H = Hp_pars(r, p);
-  double S = Sigma(r, p);
-
-  // Calculate the density
-  double dens = S/(sqrt(2. * M_PI) * H) * exp(-0.5 * (z/H) * (z/H));
-
-  return dens;
-}
-
-
-// Ksi is microturbulent broadining width in units of km/s. Output of this function
-// is in cm/s for RADMC (RADMC manual, eqn 7.12)
+//
+// // Scale height, calculate in cylindrical coordinates
+// double Hp(double r, double M_star, double T_10, double q) // inputs in cgs
+// {
+//   double temp = temperature(r, T_10, q); // [K]
+//   return sqrt(kB * temp * r*r*r /(mu_gas * m_H * G * M_star)); // [cm]
+// }
+//
+// double Hp_pars(double r, struct pars * p)
+// {
+//   return Hp(r, p->M_star * M_sun, p->T_10, p->q);
+// }
+//
+// // Calculate the gas surface density using cylindrical coordinates.
+// double Sigma(double r, struct pars * p)
+// {
+//   double r_c = p->r_c * AU;
+//
+//   return p->Sigma_c * pow(r/r_c, -p->gamma) * exp(-pow(r/r_c, 2. -p->gamma));
+// }
+//
+//
+// // Delivers a gas density in g/cm^3
+// double rho(double r, double z, struct pars * p)
+// {
+//   double H = Hp_pars(r, p);
+//   double S = Sigma(r, p);
+//
+//   // Calculate the density
+//   double dens = S/(sqrt(2. * M_PI) * H) * exp(-0.5 * (z/H) * (z/H));
+//
+//   return dens;
+// }
+//
+//
+// // Ksi is microturbulent broadining width in units of km/s. Output of this function
+// // is in cm/s for RADMC (RADMC manual, eqn 7.12)
 double microturbulence(double ksi)
 {
   return ksi * 1.e5; // convert from km/s to cm/s
 }
 
-
-// Calculate the partition function for the temperature
-// uses Mangum and Shirley expansion
-// assumes B0 in Hz, depends on molecule
-double Z_partition(double T, struct molecule * m)
-{
-  double nugget = (h * m->B0) / (kB * T);
-  return 1./nugget + 1/3. + 1/15. * nugget + 4. * nugget*nugget / 315. + nugget*nugget*nugget / 315.;
-}
-
-// Calculate the source function. nu in Hz.
-double S_nu(double r, double z, double nu, struct pars * p)
-{
-  double T = temperature_pars(r, p);
-  return (2.0 * h * nu*nu*nu)/(cc*cc) / (exp(h * nu / (kB * T)) - 1.0);
-}
-
-
-// Calculate Upsilon, the opacity before the line profile
-double Upsilon_nu(double r, double z, double nu, struct pars * p, struct molecule * m)
-{
-  double T = temperature_pars(r, p);
-
-  // Many of the terms in Upsilon could be pre-calculated for the molecule.
-  double g_l = 2.0 * m->l + 1.0;
-
-  double n_l = m->X_mol * rho(r, z, p) * g_l * exp(-m->T_L / T) / Z_partition(T, m);
-
-  // sigma_0
-  double sigma_0 = 16.0 * M_PI * M_PI * M_PI / (h * h * cc) * (kB * m->T_L) * (m->l + 1) / (m->l * (2 * m->l + 1)) * (m->mu)*(m->mu);
-
-  // calculate Delta V
-  double DeltaV = sqrt(2.0 * kB * T / m->mol_weight + microturbulence(p->ksi)*microturbulence(p->ksi));
-
-  return n_l * sigma_0 * cc / (DeltaV * m->nu_0 * sqrt(M_PI)) * (1.0 - exp(- h * nu / (kB * T)));
-}
-
+//
+// // Calculate the partition function for the temperature
+// // uses Mangum and Shirley expansion
+// // assumes B0 in Hz, depends on molecule
+// double Z_partition(double T, struct molecule * m)
+// {
+//   double nugget = (h * m->B0) / (kB * T);
+//   return 1./nugget + 1/3. + 1/15. * nugget + 4. * nugget*nugget / 315. + nugget*nugget*nugget / 315.;
+// }
+//
+// // Calculate the source function. nu in Hz.
+// double S_nu(double r, double z, double nu, struct pars * p)
+// {
+//   double T = temperature_pars(r, p);
+//   return (2.0 * h * nu*nu*nu)/(cc*cc) / (exp(h * nu / (kB * T)) - 1.0);
+// }
+//
+//
+// // Calculate Upsilon, the opacity before the line profile
+// double Upsilon_nu(double r, double z, double nu, struct pars * p, struct molecule * m)
+// {
+//   double T = temperature_pars(r, p);
+//
+//   // Many of the terms in Upsilon could be pre-calculated for the molecule.
+//   double g_l = 2.0 * m->l + 1.0;
+//
+//   double n_l = m->X_mol * rho(r, z, p) * g_l * exp(-m->T_L / T) / Z_partition(T, m);
+//
+//   // sigma_0
+//   double sigma_0 = 16.0 * M_PI * M_PI * M_PI / (h * h * cc) * (kB * m->T_L) * (m->l + 1) / (m->l * (2 * m->l + 1)) * (m->mu)*(m->mu);
+//
+//   // calculate Delta V
+//   double DeltaV = sqrt(2.0 * kB * T / m->mol_weight + microturbulence(p->ksi)*microturbulence(p->ksi));
+//
+//   return n_l * sigma_0 * cc / (DeltaV * m->nu_0 * sqrt(M_PI)) * (1.0 - exp(- h * nu / (kB * T)));
+// }
+//
 // Calculate (Delta V)^2. Returns in cm/s.
 double DeltaV2(double r, double z, struct pars * p, struct molecule * m)
 {
@@ -472,43 +472,43 @@ double DeltaV2(double r, double z, struct pars * p, struct molecule * m)
 //
 // rmax2 is the maximum disk radius squared, in [cm^2].
 // Returns a bool true/false
-// __device__ bool verify_pixel(double xprime, double yprime, struct pars * p, double v0, double DeltaVmax, double rmax2)
-// {
-//   double vb_min = (v0 - 3.0 * DeltaVmax) * 1.0e5; // convert from km/s to cm/s
-//   double vb_max = (v0 + 3.0 * DeltaVmax) * 1.0e5; // convert from km/s to cm/s
-//
-//   double rho2 = xprime*xprime + yprime*yprime;
-//
-//   if (rho2 > rmax2) return false;
-//
-//   bool overlap = (vb_min < 0.0) & (vb_max > 0.0);
-//
-//   if (xprime > 0.0) {
-//       if (vb_max < 0.0)
-//         return false;
-//       else if (overlap)
-//         return true;
-//       else {
-//         // Calculate (xprime * sqrt(G * pars.M_star * M_sun) * sin(p.incl * deg) / vb_min)^(4/3)
-//         double temp = xprime * sqrt(G * p->M_star * M_sun) * sin(p->incl * deg) / vb_min;
-//         // k^(4/3) can be written as r = x * cbrt(x)
-//         return rho2 <= (temp * cbrt(temp));
-//       }
-//   }
-//   else if (xprime < 0.0) {
-//       if (vb_min > 0.0)
-//         return false;
-//       else if (overlap)
-//         return true;
-//       else {
-//         // Calculate (xprime * sqrt(G * pars.M_star * M_sun) * sin(p.incl * deg) / vb_max)^(4/3)
-//         double temp = xprime * sqrt(G * p->M_star * M_sun) * sin(p->incl * deg) / vb_max;
-//         // k^(4/3) can be written as r = x * cbrt(x)
-//         return rho2 <= (temp * cbrt(temp));
-//       }
-//   }
-//   else return true;
-// }
+__device__ bool verify_pixel(double xprime, double yprime, struct pars * p, double v0, double DeltaVmax)
+{
+  double vb_min = (v0 - 3.0 * DeltaVmax) * 1.0e5; // convert from km/s to cm/s
+  double vb_max = (v0 + 3.0 * DeltaVmax) * 1.0e5; // convert from km/s to cm/s
+
+  double rho2 = xprime*xprime + yprime*yprime;
+
+  if (rho2 > (RMAX*RMAX * AU*AU)) return false;
+
+  bool overlap = (vb_min < 0.0) & (vb_max > 0.0);
+
+  if (xprime > 0.0) {
+      if (vb_max < 0.0)
+        return false;
+      else if (overlap)
+        return true;
+      else {
+        // Calculate (xprime * sqrt(G * pars.M_star * M_sun) * sin(p.incl * deg) / vb_min)^(4/3)
+        double temp = xprime * sqrt(G * p->M_star * M_sun) * sin(p->incl * M_PI/180.) / vb_min;
+        // k^(4/3) can be written as r = x * cbrt(x)
+        return rho2 <= (temp * cbrt(temp));
+      }
+  }
+  else if (xprime < 0.0) {
+      if (vb_min > 0.0)
+        return false;
+      else if (overlap)
+        return true;
+      else {
+        // Calculate (xprime * sqrt(G * pars.M_star * M_sun) * sin(p.incl * deg) / vb_max)^(4/3)
+        double temp = xprime * sqrt(G * p->M_star * M_sun) * sin(p->incl * M_PI/180.) / vb_max;
+        // k^(4/3) can be written as r = x * cbrt(x)
+        return rho2 <= (temp * cbrt(temp));
+      }
+  }
+  else return true;
+}
 
 
 // Helper function to better calculate the 4/3 power (four thirds power => ftp) and reduce clutter
@@ -804,7 +804,31 @@ __constant__ double dVels[NVEL]; // to store array of velocities
 // .x = DeltaV2; .y = S_nu; .z = Upsilon_nu, .w = 0.0 (junk);
 texture<float4, cudaTextureType2D, cudaReadModeElementType> texRef;
 
-__global__ void tracePixel(double *img, int numElements) // img is the DEVICE global memory
+// query the texture using the actual extent of the grid.
+__device__ float4 interp_grid(double r, double z)
+{
+
+  // otherwise, convert r and z into normalized texture coordinates and query the texture
+  double r_norm = r / (RMAX_interp * AU);
+  double z_norm = fabs(z / (ZMAX_interp * AU));
+
+  float4 ans;
+
+  // if r and z are outside of the grid, return a float4 with (1.0e5, 0.0, 0.0, 0.0)
+  // e.g., zeros for all parameters except DeltaV2, which is just a large value.
+  if ((r_norm > 1.0) || (z_norm > 1.0))
+  {
+    ans = make_float4(1.0e5, 0.0, 0.0, 0.0);
+  }
+  else
+  {
+    ans = tex2D(texRef, r_norm, z_norm);
+  }
+
+  return ans;
+}
+
+__global__ void tracePixel(bool *mask, double *img, int numElements) // img is the DEVICE global memory
 {
 
     int i_vel = blockIdx.x;
@@ -820,14 +844,28 @@ __global__ void tracePixel(double *img, int numElements) // img is the DEVICE gl
     // determine whether the pixel should be traced
     if (index < numElements)
     {
-        // img[index] = (double) square(index); // just put the index for now.
-        // img[index] = dVels[i_vel]; //dPars.M_star;
-        float4 ans = tex2D(texRef, 0.5, 0.5);
-        // float ans = tex2D(texRef, i_col, i_row);
-        // printf("numElements: %d, i_col: %d i_row: %d ans: %f \n", numElements, i_col, i_row, ans);
-        // printf("i_col: %d i_row: %d .x: %f .y:%f .z:%f .w:%f \n", i_col, i_row, ans.x, ans.y, ans.z, ans.w);
-        img[index] = ans.x;
-        // Load from the texture using tex2D(texRef, x, y);
+
+      // calculate xprime and yprime from the image dimensions
+      double xprime = 2 * (i_col - (NPIX / 2)) * RMAX * AU/ NPIX;
+      double yprime = 2 * (i_row - (NPIX / 2)) * RMAX * AU / NPIX;
+      double v0 = dVels[i_vel];
+
+      // img[index] = dVels[i_vel]; //dPars.M_star;
+
+      // calculate the minimum r_cyl along this ray
+      double rcyl_min = fabs(xprime);
+
+      // get the maxmimum DeltaV2 along this ray.
+      float4 ans = interp_grid(rcyl_min, 0.0);
+      // printf("i_col: %d i_row: %d .x: %f .y:%f .z:%f .w:%f \n", i_col, i_row, ans.x, ans.y, ans.z, ans.w);
+      double DeltaVmax = sqrt(ans.x) * 1.0e-5; // km/s
+      // printf("xprime: %f DeltaV2Max: %f, S_nu: %f, Upsilon: %f,\n", xprime/AU, DeltaV2Max, ans.y, ans.z);
+
+      // float ans = tex2D(texRef, i_col, i_row);
+      // printf("numElements: %d, i_col: %d i_row: %d ans: %f \n", numElements, i_col, i_row, ans);
+      mask[index] = verify_pixel(xprime, yprime, &dPars, v0, DeltaVmax);
+      // img[index] = verify_pixel(xprime, yprime, &dPars, v0, DeltaVmax);
+      // Load from the texture using tex2D(texRef, x, y);
     }
 
 }
@@ -837,173 +875,235 @@ __global__ void tracePixel(double *img, int numElements) // img is the DEVICE gl
 int main(void)
 {
 
-    // Calculate the appropriate constants
-    // init_constants();
+  // Calculate the appropriate constants
+  init_constants();
 
-    // Error code to check return values for CUDA calls
-    cudaError_t err = cudaSuccess;
+  // Error code to check return values for CUDA calls
+  cudaError_t err = cudaSuccess;
 
-    // Create parameters on host as constant memory
-    struct pars hPars = {.M_star=1.75, .r_c=45.0, .T_10=115., .q=0.63, .gamma=1.0, .Sigma_c=7.0, .ksi=0.14, .dpc=73.0, .incl=45.0, .PA=0.0, .vel=0.0, .mu_RA=0.0, .mu_DEC=0.0};
+  // Create parameters on host as constant memory
+  struct pars hPars = {.M_star=1.75, .r_c=45.0, .T_10=115., .q=0.63, .gamma=1.0, .Sigma_c=7.0, .ksi=0.14, .dpc=73.0, .incl=45.0, .PA=0.0, .vel=0.0, .mu_RA=0.0, .mu_DEC=0.0};
 
-    // Copy to constant memory on the device
-    err = cudaMemcpyToSymbol(dPars, &hPars, sizeof(pars));
-    if (err != cudaSuccess)
+  // Copy parameters to constant memory on the device
+  err = cudaMemcpyToSymbol(dPars, &hPars, sizeof(pars));
+  if (err != cudaSuccess)
+  {
+    fprintf(stderr, "Failed to copy parmeters to constant memory (error code %s)!\n", cudaGetErrorString(err));
+    exit(EXIT_FAILURE);
+  }
+
+  // Calculate the velocities
+  double hVels[NVEL];
+  // actual velocities will be read in from the data array, but NVEL must be known at compile time.
+  double vel_start = -2.5;
+  double vel_end = 2.5;
+  double dvel = (vel_end - vel_start) / (NVEL - 1.0);
+  // Create an array of velocities linearly spaced from vel_start to vel_end
+  // img.pVel = malloc(n_vel * sizeof(double));
+  for (int i = 0; i < NVEL; i++)
+  {
+    hVels[i] = vel_start + dvel * i;
+  }
+  // copy to device constant memory
+  err = cudaMemcpyToSymbol(dVels, hVels, NVEL * sizeof(double));
+  if (err != cudaSuccess)
+  {
+    fprintf(stderr, "Failed to copy velocities to constant memory (error code %s)!\n", cudaGetErrorString(err));
+    exit(EXIT_FAILURE);
+  }
+
+  // Set up the texture memory for the grid interpolator.
+  // this is the float4 type, right?
+  cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 32, 32, 32, cudaChannelFormatKindFloat);
+  // cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);
+
+  // allocate the 2D array to form the texture
+  cudaArray* cuArray;
+  cudaMallocArray(&cuArray, &channelDesc, NR, NZ);
+
+  // Initialize it with memory from the host
+  float4 h_data[NR][NZ];
+
+  double r_grid, z_grid, DV2;
+
+  for (int j=0; j<NZ; j++)
+  {
+    // Since there is a singularity at rcyl = 0 for many of the disk parameterizations, we set the first few
+    // columns of the texture < START_COLUMN to be equal to whatever the values are at START_COLUMN
+
+    for (int i=0; i<START_COLUMN; i++)
     {
-        fprintf(stderr, "Failed to copy parmeters to constant memory (error code %s)!\n", cudaGetErrorString(err));
-        exit(EXIT_FAILURE);
+      // calculate r_grid, z_grid
+      r_grid = (START_COLUMN + 0.0)/NR * RMAX_interp * AU;
+      z_grid = (j + 0.0)/NZ * ZMAX_interp * AU;
+
+      DV2 = DeltaV2(r_grid, z_grid, &hPars, &CO12_21);
+
+      h_data[j][i] = make_float4(DV2, 0.0, 0.0, 0.0);
+      // printf("x: %f", h_data[j][i].x);
+      // printf(" y: %f", h_data[j][i].y);
+      // printf(" z: %f", h_data[j][i].z);
+      // printf(" w: %f\n", h_data[j][i].w);
     }
 
-    // Calculate the velocities
-    double hVels[NVEL];
-    // actual velocities will be read in from the data array, but NVEL must be known at compile time.
-    double vel_start = -2.0;
-    double vel_end = 2.0;
-    double dvel = (vel_end - vel_start) / (NVEL - 1.0);
-    // Create an array of velocities linearly spaced from vel_start to vel_end
-    // img.pVel = malloc(n_vel * sizeof(double));
-    for (int i = 0; i < NVEL; i++)
+    for (int i=START_COLUMN; i<NR; i++)
     {
-      hVels[i] = vel_start + dvel * i;
-    }
-    // copy to device constant memory
-    err = cudaMemcpyToSymbol(dVels, hVels, NVEL * sizeof(double));
-    if (err != cudaSuccess)
-    {
-        fprintf(stderr, "Failed to copy velocities to constant memory (error code %s)!\n", cudaGetErrorString(err));
-        exit(EXIT_FAILURE);
+      // calculate r_grid, z_grid
+      r_grid = (i + 0.0)/NR * RMAX_interp * AU;
+      z_grid = (j + 0.0)/NZ * ZMAX_interp * AU;
+
+      DV2 = DeltaV2(r_grid, z_grid, &hPars, &CO12_21);
+
+      h_data[j][i] = make_float4(DV2, 0.0, 0.0, 0.0);
+      // printf("x: %f", h_data[j][i].x);
+      // printf(" y: %f", h_data[j][i].y);
+      // printf(" z: %f", h_data[j][i].z);
+      // printf(" w: %f\n", h_data[j][i].w);
     }
 
-    // Set up the texture memory for the grid interpolator.
-    // this is the float4 type, right?
-    cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 32, 32, 32, cudaChannelFormatKindFloat);
-    // cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);
-
-    // allocate the 2D array to form the texture
-    cudaArray* cuArray;
-    cudaMallocArray(&cuArray, &channelDesc, NR, NZ);
-
-    // Initialize it with memory from the host
-    float4 h_data[NR][NZ];
-
-    for (int j=0; j<NZ; j++)
-    {
-      for (int i=0; i<NR; i++)
-      {
-        h_data[j][i] = make_float4(i, j, i + j, 0.0);
-        // printf("x: %f", h_data[j][i].x);
-        // printf(" y: %f", h_data[j][i].y);
-        // printf(" z: %f", h_data[j][i].z);
-        // printf(" w: %f\n", h_data[j][i].w);
-      }
-    }
+  }
 
 
-    // cudaMemcpytoArray(dArray, wOffset, hOffset, source, size, cudaMemcpyHosttoDivec)
-    cudaMemcpyToArray(cuArray, 0, 0, h_data,  NR * NZ * sizeof(float4), cudaMemcpyHostToDevice);
-    // cudaMemcpyToArray(cuArray, 0, 0, h_data,  NR * NZ * sizeof(float), cudaMemcpyHostToDevice);
+  // cudaMemcpytoArray(dArray, wOffset, hOffset, source, size, cudaMemcpyHosttoDivec)
+  cudaMemcpyToArray(cuArray, 0, 0, h_data,  NR * NZ * sizeof(float4), cudaMemcpyHostToDevice);
+  // cudaMemcpyToArray(cuArray, 0, 0, h_data,  NR * NZ * sizeof(float), cudaMemcpyHostToDevice);
 
-    // texture reference parameters
-    texRef.addressMode[0] = cudaAddressModeClamp; // clamp to (0.0, 1.0 - 1/N). cudaAddressModeBorder (send to 0.0 outside)
-    texRef.addressMode[1] = cudaAddressModeClamp;
-    texRef.filterMode = cudaFilterModeLinear;     // nearest neighbor: cudaFilterModePoint. cudaFilterModeLinear
-    texRef.normalized = true; // true
+  // texture reference parameters
+  texRef.addressMode[0] = cudaAddressModeClamp; // clamp to (0.0, 1.0 - 1/N). cudaAddressModeBorder (send to 0.0 outside)
+  texRef.addressMode[1] = cudaAddressModeClamp;
+  texRef.filterMode = cudaFilterModeLinear;     // nearest neighbor: cudaFilterModePoint. cudaFilterModeLinear
+  texRef.normalized = true; // true
 
-    // Bind the array to the texture reference
-    cudaBindTextureToArray(texRef, cuArray, channelDesc);
-
-
-    // Determine the size of the image, and create memory to hold it, both on the host and on the device.
-    int numElements = NVEL * NPIX * NPIX;
-    size_t size = numElements * sizeof(double);
-
-    // HOST image memory allocation
-    double *h_img = (double *)malloc(size);
-
-    // Verify that allocations succeeded
-    if (h_img == NULL)
-    {
-        fprintf(stderr, "Failed to allocate memory for the image on the host!\n");
-        exit(EXIT_FAILURE);
-    }
-
-    // DEVICE image memory allocation
-    double *d_img = NULL;
-    err = cudaMalloc((void **)&d_img, size);
-
-    if (err != cudaSuccess)
-    {
-        fprintf(stderr, "Failed to allocate memory for the image on the device (error code %s)!\n", cudaGetErrorString(err));
-        exit(EXIT_FAILURE);
-    }
-
-    // Launch the Vector Add CUDA Kernel
-    int threadsPerBlock = NPIX;
-    // int blocksPerGrid =(numElements + threadsPerBlock - 1) / threadsPerBlock;
-    dim3 numBlocks(NVEL, NPIX);
-    printf("CUDA kernel launch with a grid %d x %d (%d blocks) of %d threads\n", numBlocks.x, numBlocks.y, numBlocks.x * numBlocks.y, threadsPerBlock);
-    printf("numElements %d\n", numElements);
-    tracePixel<<<numBlocks, threadsPerBlock>>>(d_img, numElements);
-    err = cudaGetLastError();
-
-    if (err != cudaSuccess)
-    {
-        fprintf(stderr, "Failed to launch tracePixel kernel (error code %s)!\n", cudaGetErrorString(err));
-        exit(EXIT_FAILURE);
-    }
-
-    // Copy the resulting image in device memory to the host memory.
-    printf("Copy output data from the CUDA device to the host memory\n");
-    // This call requires the kernels to have finished executing, so it's OK.
-    err = cudaMemcpy(h_img, d_img, size, cudaMemcpyDeviceToHost);
-
-    if (err != cudaSuccess)
-    {
-        fprintf(stderr, "Failed to copy image from device to host (error code %s)!\n", cudaGetErrorString(err));
-        exit(EXIT_FAILURE);
-    }
-
-    // Save the results to disk using HDF5 files.
-    // for (int i = 0; i < numElements; ++i)
-    // {
-    //     printf("i=%d, h_img[%d]=%f\n", i, i, h_img[i]);
-    // }
-
-    // Create the HDF5 file, overwrite if exists
-    hid_t file_id;
-
-    // We're storing a 1D array as the frequencies
-    // hsize_t dims_vel[1] = {NVEL};
-    // We're storing a 3D array as the image
-    hsize_t dims_img[3] = {NVEL, NPIX, NPIX};
-
-    // Create the file ID
-    file_id = H5Fcreate("img.h5", H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
-
-    // Create the double datasets within the file using the H5 Lite interface
-    // H5LTmake_dataset(file_id, "/vels", 1, dims_vel, H5T_NATIVE_DOUBLE, img->pVel);
-    // H5LTmake_dataset(file_id, "/mask", 3, dims_img, H5T_NATIVE_CHAR, img->pMask);
-    // H5LTmake_dataset(file_id, "/tau", 3, dims_img, H5T_NATIVE_DOUBLE, img->pTau);
-    H5LTmake_dataset(file_id, "/img", 3, dims_img, H5T_NATIVE_DOUBLE, h_img);
-
-    // Close up
-    H5Fclose (file_id);
+  // Bind the array to the texture reference
+  cudaBindTextureToArray(texRef, cuArray, channelDesc);
 
 
-    // Release the texture memory
-    cudaFreeArray(cuArray);
+  // Determine the size of the image, and create memory to hold it, both on the host and on the device.
+  int numElements = NVEL * NPIX * NPIX;
+  size_t size_mask = numElements * sizeof(bool);
+  size_t size_image = numElements * sizeof(double);
 
-    err = cudaFree(d_img);  // Free device global memory
+  // HOST mask memory allocation
+  bool *h_mask = (bool *)malloc(size_mask);
 
-    if (err != cudaSuccess)
-    {
-        fprintf(stderr, "Failed to free device image (error code %s)!\n", cudaGetErrorString(err));
-        exit(EXIT_FAILURE);
-    }
+  // Verify that allocations succeeded
+  if (h_mask == NULL)
+  {
+    fprintf(stderr, "Failed to allocate memory for the mask on the host!\n");
+    exit(EXIT_FAILURE);
+  }
+
+  // DEVICE mask memory allocation
+  bool *d_mask = NULL;
+  err = cudaMalloc((void **)&d_mask, size_mask);
+
+  if (err != cudaSuccess)
+  {
+    fprintf(stderr, "Failed to allocate memory for the mask on the device (error code %s)!\n", cudaGetErrorString(err));
+    exit(EXIT_FAILURE);
+  }
+
+  // HOST image memory allocation
+  double *h_img = (double *)malloc(size_image);
+
+  // Verify that allocations succeeded
+  if (h_img == NULL)
+  {
+    fprintf(stderr, "Failed to allocate memory for the image on the host!\n");
+    exit(EXIT_FAILURE);
+  }
+
+  // DEVICE image memory allocation
+  double *d_img = NULL;
+  err = cudaMalloc((void **)&d_img, size_image);
+
+  if (err != cudaSuccess)
+  {
+    fprintf(stderr, "Failed to allocate memory for the image on the device (error code %s)!\n", cudaGetErrorString(err));
+    exit(EXIT_FAILURE);
+  }
+
+
+  // Launch the Vector Add CUDA Kernel
+  int threadsPerBlock = NPIX;
+  // int blocksPerGrid =(numElements + threadsPerBlock - 1) / threadsPerBlock;
+  dim3 numBlocks(NVEL, NPIX);
+  printf("CUDA kernel launch with a grid %d x %d (%d blocks) of %d threads\n", numBlocks.x, numBlocks.y, numBlocks.x * numBlocks.y, threadsPerBlock);
+  printf("numElements %d\n", numElements);
+  tracePixel<<<numBlocks, threadsPerBlock>>>(d_mask, d_img, numElements);
+  err = cudaGetLastError();
+
+  if (err != cudaSuccess)
+  {
+    fprintf(stderr, "Failed to launch tracePixel kernel (error code %s)!\n", cudaGetErrorString(err));
+    exit(EXIT_FAILURE);
+  }
+
+  // Copy the resulting mask in device memory to the host memory.
+  printf("Copy mask data from the CUDA device to the host memory\n");
+  // This call requires the kernels to have finished executing, so it's OK.
+  err = cudaMemcpy(h_mask, d_mask, size_mask, cudaMemcpyDeviceToHost);
+
+  if (err != cudaSuccess)
+  {
+    fprintf(stderr, "Failed to copy mask from device to host (error code %s)!\n", cudaGetErrorString(err));
+    exit(EXIT_FAILURE);
+  }
+
+
+  // Copy the resulting image in device memory to the host memory.
+  printf("Copy image data from the CUDA device to the host memory\n");
+  // This call requires the kernels to have finished executing, so it's OK.
+  err = cudaMemcpy(h_img, d_img, size_image, cudaMemcpyDeviceToHost);
+
+  if (err != cudaSuccess)
+  {
+    fprintf(stderr, "Failed to copy image from device to host (error code %s)!\n", cudaGetErrorString(err));
+    exit(EXIT_FAILURE);
+  }
+
+  // Save the results to disk using HDF5 files.
+  // for (int i = 0; i < numElements; ++i)
+  // {
+  //     printf("i=%d, h_img[%d]=%f\n", i, i, h_img[i]);
+  // }
+
+  // Create the HDF5 file, overwrite if exists
+  hid_t file_id;
+
+  // We're storing a 1D array as the frequencies
+  // hsize_t dims_vel[1] = {NVEL};
+  // We're storing a 3D array as the image
+  hsize_t dims_img[3] = {NVEL, NPIX, NPIX};
+
+  // Create the file ID
+  file_id = H5Fcreate("img.h5", H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+
+  // Create the double datasets within the file using the H5 Lite interface
+  // H5LTmake_dataset(file_id, "/vels", 1, dims_vel, H5T_NATIVE_DOUBLE, img->pVel);
+  H5LTmake_dataset(file_id, "/mask", 3, dims_img, H5T_NATIVE_CHAR, h_mask);
+  // H5LTmake_dataset(file_id, "/mask", 3, dims_img, H5T_NATIVE_DOUBLE, h_mask);
+  // H5LTmake_dataset(file_id, "/tau", 3, dims_img, H5T_NATIVE_DOUBLE, img->pTau);
+  H5LTmake_dataset(file_id, "/img", 3, dims_img, H5T_NATIVE_DOUBLE, h_img);
+
+  // Close up
+  H5Fclose (file_id);
+
+
+  // Release the texture memory
+  cudaFreeArray(cuArray);
+
+  err = cudaFree(d_img);  // Free device global memory
+
+  if (err != cudaSuccess)
+  {
+    fprintf(stderr, "Failed to free device image (error code %s)!\n", cudaGetErrorString(err));
+    exit(EXIT_FAILURE);
+  }
 
 
 
-    free(h_img); // Free host memory
+  free(h_img); // Free host memory
 
-    return 0;
+  return 0;
 }
