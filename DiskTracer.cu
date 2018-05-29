@@ -13,12 +13,12 @@
 
 // Set up for the problem
 // Number of pix per dimension
-#define NPIX 128
+#define NPIX 256
 // Number of velocities
 #define NVEL 8
 
 // Maximum extent of the image (in AU)
-#define RMAX 800.0
+#define RMAX_image 800.0
 
 // number of bins of the texture grid for DeltaV2, S_nu, and Upsilon_nu
 #define NR 512
@@ -90,33 +90,15 @@ struct coords{
   double vlos;
 };
 
-// definition of  Grid interpolation structure
-// Hosts 2D arrays which will be allocated by malloc() upon runtime
-struct grid{
-  int nr; // number of radial bins (cylindrical radius)
-  double rmax; // [cm] maximum radial extent of the disk (cylindrical radius)
-  double dr; // [cm] the physical change in r for each index
-  int nz; // number of vertical bins
-  double zmax; // [cm] maximum vertical extent of the disk
-  double dz; // [cm] the physical change in z for each index
-  double * pDeltaV2; // (nz, nr) pointer to the DeltaV2 array
-  double * pS_nu; // (nz, nr) pointer to the S_nu array
-  double * pUpsilon; // (nz, nr) pointer to the Upsilon
-};
-
-// An interpolated point of DeltaV2, S_nu, and Upsilon
-struct interp_point{
-  double DeltaV2;
-  double S_nu;
-  double Upsilon;
-};
+// Function definition for how we'll interpolate using the CUDA texture
+__device__ float4 interp_grid(double r, double z);
 
 
 __managed__ double M_sun = 1.99e33; // [g]
 __managed__ double AU = 1.4959787066e13; // [cm]
 double pc = 3.0856776e18; // [cm]
 __managed__ double G = 6.67259e-8; // [cm3 g-1 s-2]
-double kB = 1.380658e-16; // [erg K^-1] Boltzmann constant
+__managed__ double kB = 1.380658e-16; // [erg K^-1] Boltzmann constant
 double h = 6.6260755e-27; //erg s Planck constant
 double cc = 2.99792458e10; // [cm s^-1]
 
@@ -128,8 +110,8 @@ double nyquist_factor = 2.2;
 double amu = 1.6605402e-24; // [g]
 
 // Molecular
-double mu_gas = 2.37; // mean molecular weight of circumstellar gas
-double m_H = 1.6733e-24; // g mass of hydrogen atom
+__managed__ double mu_gas = 2.37; // mean molecular weight of circumstellar gas
+__managed__ double m_H = 1.6733e-24; // g mass of hydrogen atom
 
 double f_12CO = 7.5e-5;
 
@@ -146,7 +128,7 @@ double chi_12CO, chi_13CO, chi_C18O, m_CO, m_12CO, m_13CO, m_C18O;
 struct molecule CO12_21, CO12_32, CO13_21, CO13_32, CO18_21, CO18_32;
 
 // Simply use midpoint formula and adaptive steps to measure tau
-double TAU_THRESH = 8.0;
+__device__ double TAU_THRESH = 8.0;
 
 // function to initialize molecule structures
 // Takes in a pointer to the molecule structure.
@@ -194,112 +176,96 @@ void init_constants(void)
 
 }
 
-
 // ****************************************
 // * model functions
 // ****************************************
 
-
 // Assume all inputs to these functions are in CGS units and in *cylindrical* coordinates.
-// Parametric type T allows passing individual Float64 or Vectors.
-// Alternate functions accept pars passed around, where pars is in M_star, AU, etc...
-// The Keplerian velocity assuming non-zero thickness to the disk.
-// double velocity(double r, double z, double M_star)
-// {
-//   double a = r*r + z*z;
-//   // Calculating sqrt(G * M_star / (r*r + z*z)^(3./2)) * r;
-//   return sqrt(G * M_star / (a * sqrt(a))) * r;
-// }
-//
-// // Calculate temperature in cylindrical coordinates.
-double temperature(double r, double T_10, double q)
+
+// Calculate temperature in cylindrical coordinates.
+__device__ __host__ double temperature(double r, double T_10, double q)
 {
   return T_10 * pow(r / (10. * AU), -q);
 }
 
-double temperature_pars(double r, struct pars * p)
+__device__ __host__ double temperature_pars(double r, struct pars * p)
 {
   return temperature(r, p->T_10, p->q);
 }
-//
-// // Scale height, calculate in cylindrical coordinates
-// double Hp(double r, double M_star, double T_10, double q) // inputs in cgs
-// {
-//   double temp = temperature(r, T_10, q); // [K]
-//   return sqrt(kB * temp * r*r*r /(mu_gas * m_H * G * M_star)); // [cm]
-// }
-//
-// double Hp_pars(double r, struct pars * p)
-// {
-//   return Hp(r, p->M_star * M_sun, p->T_10, p->q);
-// }
-//
-// // Calculate the gas surface density using cylindrical coordinates.
-// double Sigma(double r, struct pars * p)
-// {
-//   double r_c = p->r_c * AU;
-//
-//   return p->Sigma_c * pow(r/r_c, -p->gamma) * exp(-pow(r/r_c, 2. -p->gamma));
-// }
-//
-//
-// // Delivers a gas density in g/cm^3
-// double rho(double r, double z, struct pars * p)
-// {
-//   double H = Hp_pars(r, p);
-//   double S = Sigma(r, p);
-//
-//   // Calculate the density
-//   double dens = S/(sqrt(2. * M_PI) * H) * exp(-0.5 * (z/H) * (z/H));
-//
-//   return dens;
-// }
-//
-//
-// // Ksi is microturbulent broadining width in units of km/s. Output of this function
-// // is in cm/s for RADMC (RADMC manual, eqn 7.12)
+
+// Scale height, calculate in cylindrical coordinates
+__device__ __host__ double Hp(double r, double M_star, double T_10, double q) // inputs in cgs
+{
+  double temp = temperature(r, T_10, q); // [K]
+  return sqrt(kB * temp * r*r*r /(mu_gas * m_H * G * M_star)); // [cm]
+}
+
+__device__ __host__ double Hp_pars(double r, struct pars * p)
+{
+  return Hp(r, p->M_star * M_sun, p->T_10, p->q);
+}
+
+// Calculate the gas surface density using cylindrical coordinates.
+double Sigma(double r, struct pars * p)
+{
+  double r_c = p->r_c * AU;
+
+  return p->Sigma_c * pow(r/r_c, -p->gamma) * exp(-pow(r/r_c, 2. -p->gamma));
+}
+
+// Delivers a gas density in g/cm^3
+double rho(double r, double z, struct pars * p)
+{
+  double H = Hp_pars(r, p);
+  double S = Sigma(r, p);
+
+  // Calculate the density
+  double dens = S/(sqrt(2. * M_PI) * H) * exp(-0.5 * (z/H) * (z/H));
+
+  return dens;
+}
+
+// Ksi is microturbulent broadining width in units of km/s.
+// Output of this function is in cm/s (e.g., see RADMC manual, eqn 7.12)
 double microturbulence(double ksi)
 {
   return ksi * 1.e5; // convert from km/s to cm/s
 }
 
-//
-// // Calculate the partition function for the temperature
-// // uses Mangum and Shirley expansion
-// // assumes B0 in Hz, depends on molecule
-// double Z_partition(double T, struct molecule * m)
-// {
-//   double nugget = (h * m->B0) / (kB * T);
-//   return 1./nugget + 1/3. + 1/15. * nugget + 4. * nugget*nugget / 315. + nugget*nugget*nugget / 315.;
-// }
-//
-// // Calculate the source function. nu in Hz.
-// double S_nu(double r, double z, double nu, struct pars * p)
-// {
-//   double T = temperature_pars(r, p);
-//   return (2.0 * h * nu*nu*nu)/(cc*cc) / (exp(h * nu / (kB * T)) - 1.0);
-// }
-//
-//
-// // Calculate Upsilon, the opacity before the line profile
-// double Upsilon_nu(double r, double z, double nu, struct pars * p, struct molecule * m)
-// {
-//   double T = temperature_pars(r, p);
-//
-//   // Many of the terms in Upsilon could be pre-calculated for the molecule.
-//   double g_l = 2.0 * m->l + 1.0;
-//
-//   double n_l = m->X_mol * rho(r, z, p) * g_l * exp(-m->T_L / T) / Z_partition(T, m);
-//
-//   // sigma_0
-//   double sigma_0 = 16.0 * M_PI * M_PI * M_PI / (h * h * cc) * (kB * m->T_L) * (m->l + 1) / (m->l * (2 * m->l + 1)) * (m->mu)*(m->mu);
-//
-//   // calculate Delta V
-//   double DeltaV = sqrt(2.0 * kB * T / m->mol_weight + microturbulence(p->ksi)*microturbulence(p->ksi));
-//
-//   return n_l * sigma_0 * cc / (DeltaV * m->nu_0 * sqrt(M_PI)) * (1.0 - exp(- h * nu / (kB * T)));
-// }
-//
+// Calculate the partition function for the temperature using Mangum and Shirley expansion.
+// Assumes B0 in Hz.
+double Z_partition(double T, struct molecule * m)
+{
+  double nugget = (h * m->B0) / (kB * T);
+  return 1./nugget + 1/3. + 1/15. * nugget + 4. * nugget*nugget / 315. + nugget*nugget*nugget / 315.;
+}
+
+// Calculate the source function. nu in Hz.
+double S_nu(double r, double z, double nu, struct pars * p)
+{
+  double T = temperature_pars(r, p);
+  return (2.0 * h * nu*nu*nu)/(cc*cc) / (exp(h * nu / (kB * T)) - 1.0);
+}
+
+// Calculate Upsilon, the opacity before the line profile
+double Upsilon_nu(double r, double z, double nu, struct pars * p, struct molecule * m)
+{
+  double T = temperature_pars(r, p);
+
+  // Many of the terms in Upsilon could be pre-calculated for the molecule.
+  double g_l = 2.0 * m->l + 1.0;
+
+  double n_l = m->X_mol * rho(r, z, p) * g_l * exp(-m->T_L / T) / Z_partition(T, m);
+
+  // sigma_0
+  double sigma_0 = 16.0 * M_PI * M_PI * M_PI / (h * h * cc) * (kB * m->T_L) * (m->l + 1) / (m->l * (2 * m->l + 1)) * (m->mu)*(m->mu);
+
+  // calculate Delta V
+  double DeltaV = sqrt(2.0 * kB * T / m->mol_weight + microturbulence(p->ksi)*microturbulence(p->ksi));
+
+  return n_l * sigma_0 * cc / (DeltaV * m->nu_0 * sqrt(M_PI)) * (1.0 - exp(- h * nu / (kB * T)));
+}
+
 // Calculate (Delta V)^2. Returns in cm/s.
 double DeltaV2(double r, double z, struct pars * p, struct molecule * m)
 {
@@ -307,155 +273,84 @@ double DeltaV2(double r, double z, struct pars * p, struct molecule * m)
   return 2.0 * kB * T/m->mol_weight + (p->ksi * 1.e5) * (p->ksi * 1.e5);
 }
 
-
-// Functions to compute grid objects for fast interpolation.
-// Because we will always be querying for the same rcyl, z values,
-// Return the three quantities at once.
-// Compared to the Julia version, this needs to be split up into a struct, and a function to query the struct.
-// In CUDA, this will become a texture
-
-// Store the arrays for DeltaV2, S_nu, and Upsilon_nu as arrays within the structure.
-
-// The grid structure is defined in diskTracer.h
-
-// // Initialize the structure. Return a pointer to the structure.
-// struct grid * init_grid(struct pars * p, struct molecule * m, double nu, int nr, double rmax, int nz, double zmax)
-// struct grid init_grid(struct pars * p, struct molecule * m, double nu, int nr, double rmax, int nz, double zmax)
-// {
-//
-//   double dr = rmax / (nr - 1);
-//   double dz = zmax / (nz - 1);
-//
-//   // Allocate space for three arrays with shape (nz, nr)
-//   double * pDeltaV2 = malloc(nr * nz * sizeof(double));
-//   double * pS_nu = malloc(nr * nz * sizeof(double));
-//   double * pUpsilon = malloc(nr * nz * sizeof(double));
-//
-//
-//   // Using the parameters, molecule, and frequency, fill in the values for DeltaV2, S_nu, and Upsilon
-//   // Loop over all the grid cells
-//   double r, z;
-//
-//   // Index variables. i = row, j=col. k is the stride, k = i * nr +j
-//   int i, j, k;
-//   int start_column = 10 - 1; // This means that all columns prior to 10 will have the same value as column 10
-//
-//   // We'll start at the tenth column (r)
-//   // Due to the way this is stored as a 2D array, i corresponds to r
-//   // and j actually corresponds to z
-//   // but the r dimension is the columns, and the z dimension is the rows
-//   // Actual radii, columns
-//
-//   for (j=0; j<nz; j++){
-//     for (i=0; i<start_column; i++){
-//       r = start_column * dr;
-//       z = j * dz;
-//       k = i + nr * j; // 1D linear index
-//       // printf("k1 = %d\n", k);
-//       pDeltaV2[k] = DeltaV2(r, z, p, m);
-//       pS_nu[k] = S_nu(r, z, nu, p);
-//       pUpsilon[k] = Upsilon_nu(r, z, nu, p, m);
-//     };
-//
-//     for (i=start_column; i<nr; i++){
-//       r = i * dr;
-//       z = j * dz;
-//       k = nr * j + i; // 1D linear index
-//       // printf("k2 = %d\n", k);
-//
-//       pDeltaV2[k] = DeltaV2(r, z, p, m);
-//       pS_nu[k] = S_nu(r, z, nu, p);
-//       pUpsilon[k] = Upsilon_nu(r, z, nu, p, m);
-//       // printf("Upsilon at %f AU, %f AU is %e\n", r/AU, z/AU, pUpsilon[k]);
-//     };
-//   };
-//
-//   // return an initialized grid structure
-//   struct grid myGrid = {.nr=nr, .rmax=rmax, .dr=dr, .nz=nz, .zmax=zmax, .dz=dz, .pDeltaV2=pDeltaV2, .pS_nu=pS_nu, .pUpsilon=pUpsilon};
-//   return myGrid;
-// }
-
-
-
 // ****************************************
 // * geometry functions
 // ****************************************
 
 
 // Precalculate the quantities necessary to make repeated calls to `get_r_cyl`, `get_z`, and `get_vlos` efficient.
-// struct geoPrecalc get_geoPrecalc(double xprime, double yprime, struct pars * p)
-// {
-//
-//   // Initialize an empty struct
-//   struct geoPrecalc temp = {};
-//
-//   // For get_r_cyl
-//   temp.xp2 = xprime * xprime;
-//   temp.a1 = cos(p->incl * deg) * yprime;
-//   temp.a2 = sin(p->incl * deg);
-//   // r_cyl = sqrt(xp2 + (a1 - a2 * zprime)^2)
-//
-//   // For get_z
-//   temp.b1 = sin(p->incl * deg) * yprime;
-//   temp.b2 = cos(p->incl * deg);
-//   // z = b1 + b2 * zprime
-//
-//   // For get_vlos
-//   temp.c1 = sqrt(G * p->M_star * M_sun) * sin(p->incl * deg) * xprime;
-//   temp.c2 = xprime * xprime + yprime * yprime;
-//   // vlos = c1 /(c2 + zprime^2)^(3/4.)
-//
-//   return temp;
-// }
+__device__ struct geoPrecalc get_geoPrecalc(double xprime, double yprime, struct pars * p)
+{
+
+  // Initialize an empty struct
+  struct geoPrecalc temp = {};
+
+  // For get_r_cyl
+  temp.xp2 = xprime * xprime;
+  temp.a1 = cos(p->incl * M_PI/180.) * yprime;
+  temp.a2 = sin(p->incl * M_PI/180.);
+  // r_cyl = sqrt(xp2 + (a1 - a2 * zprime)^2)
+
+  // For get_z
+  temp.b1 = sin(p->incl * M_PI/180.) * yprime;
+  temp.b2 = cos(p->incl * M_PI/180.);
+  // z = b1 + b2 * zprime
+
+  // For get_vlos
+  temp.c1 = sqrt(G * p->M_star * M_sun) * sin(p->incl * M_PI/180.) * xprime;
+  temp.c2 = xprime * xprime + yprime * yprime;
+  // vlos = c1 /(c2 + zprime^2)^(3/4.)
+
+  return temp;
+}
 
 // Take a cartesian point in the sky plane and get the cylindrical radius of the disk
 // Useful for querying the disk structure or velocity field.
 // assumes i is in degrees
-// double get_r_cyl(double xprime, double yprime, double zprime, double i)
-// {
-//   double temp = (cos(i * deg) * yprime - sin(i * deg) * zprime);
-//   return sqrt(xprime * xprime + temp*temp);
-// }
+__device__ double get_r_cyl(double xprime, double yprime, double zprime, double i)
+{
+  double temp = (cos(i * M_PI/180.) * yprime - sin(i * M_PI/180.) * zprime);
+  return sqrt(xprime * xprime + temp*temp);
+}
 
 // Take a cartesian point in the sky plane and get the cylindrical z point in the disk
 // assumes i is in degrees
-// double get_z(double xprime, double yprime, double zprime, double i)
-// {
-//   return sin(i * deg) * yprime + cos(i * deg) * zprime;
-// }
+__device__ double get_z(double xprime, double yprime, double zprime, double i)
+{
+  return sin(i * M_PI/180.) * yprime + cos(i * M_PI/180.) * zprime;
+}
 
 // Take a cartesian point in the sky plane and get the line of sight velocity.
 // Negative velocity implies a blueshift (towards the observer).
-// double get_vlos(double xprime, double yprime, double zprime, struct pars * p)
-// {
-//   // According to NVIDIA best practices guide, pg. 50, k^(3/4) can be rewritten as r = sqrt(k); r = r * sqrt(r)
-//   double temp, k = xprime*xprime + yprime*yprime + zprime*zprime;
-//   temp = sqrt(k);
-//   temp = temp * sqrt(temp);
-//   // temp = (xprime*xprime + yprime*yprime + zprime*zprime)^(3/4.)
-//   return sqrt(G * p->M_star * M_sun) * sin(p->incl * deg) * xprime / temp;
-//
-// }
+__device__ double get_vlos(double xprime, double yprime, double zprime, struct pars * p)
+{
+  // According to NVIDIA best practices guide, pg. 50, k^(3/4) can be rewritten as r = sqrt(k); r = r * sqrt(r)
+  double temp, k = xprime*xprime + yprime*yprime + zprime*zprime;
+  temp = sqrt(k);
+  temp = temp * sqrt(temp);
+  // temp = (xprime*xprime + yprime*yprime + zprime*zprime)^(3/4.)
+  return sqrt(G * p->M_star * M_sun) * sin(p->incl * M_PI/180.) * xprime / temp;
+}
 
 // get_coords is a function to return the necessary rcyl, z, vlos quickly along a given ray.
-// struct coords get_coords(double zprime, struct geoPrecalc gcalc)
-// {
-//   // Empty temp struct
-//   struct coords temp = {};
-//
-//   double t_rcyl = (gcalc.a1 - gcalc.a2 * zprime);
-//   temp.rcyl = sqrt(gcalc.xp2 + t_rcyl*t_rcyl);
-//
-//   temp.z = gcalc.b1 + gcalc.b2 * zprime;
-//
-//   //vlos = gcalc.c1 / (gcalc.c2 + zprime^2)^(3./4);
-//   // k^(3/4) can be rewritten as r = sqrt(k); r = r * sqrt(r)
-//   double t_vlos =  sqrt(gcalc.c2 + zprime*zprime);
-//   t_vlos = t_vlos * sqrt(t_vlos);
-//   temp.vlos = gcalc.c1 / t_vlos;
-//
-//   return temp;
-// }
+__device__ struct coords get_coords(double zprime, struct geoPrecalc gcalc)
+{
+  // Empty temp struct
+  struct coords temp = {};
+
+  double t_rcyl = (gcalc.a1 - gcalc.a2 * zprime);
+  temp.rcyl = sqrt(gcalc.xp2 + t_rcyl*t_rcyl);
+
+  temp.z = gcalc.b1 + gcalc.b2 * zprime;
+
+  //vlos = gcalc.c1 / (gcalc.c2 + zprime^2)^(3./4);
+  // k^(3/4) can be rewritten as r = sqrt(k); r = r * sqrt(r)
+  double t_vlos =  sqrt(gcalc.c2 + zprime*zprime);
+  t_vlos = t_vlos * sqrt(t_vlos);
+  temp.vlos = gcalc.c1 / t_vlos;
+
+  return temp;
+}
 
 // Return true if the pixel should be traced (or at least not immediately rejected).
 // Valid for all pixels with this same xprime value.
@@ -469,8 +364,6 @@ double DeltaV2(double r, double z, struct pars * p, struct molecule * m)
 
 // Verify whether a given pixel has any any emitting regions. Assumes xprime, yprime, and rmax are in cm. The velocity
 // equivalent to the frequency to be traced is given by v0 [km/s]. DeltaVmax is also in km/s.
-//
-// rmax2 is the maximum disk radius squared, in [cm^2].
 // Returns a bool true/false
 __device__ bool verify_pixel(double xprime, double yprime, struct pars * p, double v0, double DeltaVmax)
 {
@@ -479,7 +372,7 @@ __device__ bool verify_pixel(double xprime, double yprime, struct pars * p, doub
 
   double rho2 = xprime*xprime + yprime*yprime;
 
-  if (rho2 > (RMAX*RMAX * AU*AU)) return false;
+  if (rho2 > (RMAX_interp*RMAX_interp * AU*AU)) return false;
 
   bool overlap = (vb_min < 0.0) & (vb_max > 0.0);
 
@@ -512,243 +405,237 @@ __device__ bool verify_pixel(double xprime, double yprime, struct pars * p, doub
 
 
 // Helper function to better calculate the 4/3 power (four thirds power => ftp) and reduce clutter
-// double ftp(double t, double v)
-// {
-//   // (t/v)^(4/3.)
-//   // according to NVIDIA developers guide, this is best carried out by
-//   // r = x * cbrt(x);
-//   double temp = t/v;
-//   return temp * cbrt(temp);
-// }
+__device__ double ftp(double t, double v)
+{
+  // (t/v)^(4/3.)
+  // according to NVIDIA developers guide, this is best carried out by
+  // r = x * cbrt(x);
+  double temp = t/v;
+  return temp * cbrt(temp);
+}
 
 
 // Get the starting and ending bounding regions on zprime, based only upon the kinematic/geometrical constraints.
 // Assumes xprime, yprime, and rmax are in cm. The velocity equivalent to the frequency to be traced is given by v0
 // [km/s]. DeltaVmax is the maximum velocity expected along the ray, also in km/s.
-// struct zps get_bounding_zps(double xprime, double yprime, struct pars * p, double v0, double DeltaVmax, double rmax)
-// {
-//
-//   // Initialize all to 0
-//   struct zps myZps = {};
-//
-//   // The three-sigma bounds on the line profile
-//   double vb_min = (v0 - 3.0 * DeltaVmax) * 1.e5; // convert from km/s to cm/s
-//   double vb_max = (v0 + 3.0 * DeltaVmax) * 1.e5; // convert from km/s to cm/s
-//
-//   // Basically, we can't be larger or smaller than this.
-//   double v_temp = xprime*xprime + yprime*yprime;
-//   // to find x^(3/4) do r = sqrt(x); r = r * sqrt(r)
-//   v_temp = sqrt(v_temp);
-//   v_temp = v_temp * sqrt(v_temp);
-//   // v_temp = (xprime^2 + yprime^2)^(3./4)
-//   double vb_crit = xprime * sqrt(G * p->M_star * M_sun) * sin(p->incl * deg)/v_temp;
-//
-//   // We want to assert that this pixel has already fulfilled the zeroth order check that there will be emission
-//   // @assert (((xprime >= 0.0) & (vb_max >= 0.0)) | ((xprime <= 0.0) & (vb_min <= 0.0))) "Pixel $xprime, $yprime, will have no emission."
-//
-//   // There exists a vb=0 velocity, so the best we can say is that z1start and z2end starts and end at (rmax, -rmax),
-//   // respectively
-//   bool overlap = (vb_min <= 0.0) && (vb_max >= 0.0);
-//
-//   // The velocity where the ray intersects the plane of the sky (z^\prime = 0) exists between vb_min and vb_max
-//   // This means that the two separate bounding regions merge into one.
-//   bool overlap_crit = (vb_crit > vb_min) && (vb_crit < vb_max);
-//
-//   double xxyy = xprime*xprime + yprime*yprime;
-//   double t1 = xprime * sqrt(G * p->M_star * M_sun) * sin(p->incl * deg);
-//
-//   if ((xprime >= 0.0) & (vb_max >= 0.0))
-//   {
-//     if (overlap)
-//     {
-//       myZps.z1start = rmax;
-//       myZps.z2end = -rmax;
-//     }
-//     else if (vb_min >= 0.0)
-//     {
-//       myZps.z1start = sqrt(ftp(t1, vb_min) - xxyy);
-//       myZps.z2end = -sqrt(ftp(t1, vb_min) - xxyy);
-//     }
-//     if (overlap_crit)
-//     {
-//       // There exists a vb within the range of vbs which yields zprime = 0, so the two regions merge.
-//       myZps.z1end = 0.0;
-//       myZps.z2start = 0.0;
-//       myZps.merge = true;
-//       return myZps;
-//     }
-//     else
-//     {
-//       myZps.z1end = sqrt(ftp(t1, vb_max) - xxyy);
-//       myZps.z2start = -sqrt(ftp(t1, vb_max) - xxyy);
-//     }
-//   }
-//   else if ((xprime <= 0.0) & (vb_min <= 0.0))
-//   {
-//     if (overlap)
-//     {
-//       myZps.z1start = rmax;
-//       myZps.z2end = -rmax;
-//     }
-//     else if (vb_max <= 0.0)
-//     {
-//       myZps.z1start = sqrt(ftp(t1, vb_max) - xxyy);
-//       myZps.z2end = -sqrt(ftp(t1, vb_max) - xxyy);
-//     }
-//
-//     if (overlap_crit)
-//     {
-//       // There exists a vb within the range of vbs which yields zprime = 0, so the two regions merge.
-//       myZps.z1end = 0.0;
-//       myZps.z2start = 0.0;
-//       myZps.merge = true;
-//       return myZps;
-//     }
-//     else
-//     {
-//       myZps.z1end = sqrt(ftp(t1, vb_min) - xxyy);
-//       myZps.z2start = -sqrt(ftp(t1, vb_min) - xxyy);
-//     }
-//   }
-//   // Return all 4, initialized.
-//   myZps.merge = false;
-//   return myZps;
-// }
+__device__ struct zps get_bounding_zps(double xprime, double yprime, struct pars * p, double v0, double DeltaVmax)
+{
+
+  // Initialize all to 0
+  struct zps myZps = {};
+
+  // The three-sigma bounds on the line profile
+  double vb_min = (v0 - 3.0 * DeltaVmax) * 1.e5; // convert from km/s to cm/s
+  double vb_max = (v0 + 3.0 * DeltaVmax) * 1.e5; // convert from km/s to cm/s
+
+  // Basically, we can't be larger or smaller than this.
+  double v_temp = xprime*xprime + yprime*yprime;
+  // to find x^(3/4) do r = sqrt(x); r = r * sqrt(r)
+  v_temp = sqrt(v_temp);
+  v_temp = v_temp * sqrt(v_temp);
+  // v_temp = (xprime^2 + yprime^2)^(3./4)
+  double vb_crit = xprime * sqrt(G * p->M_star * M_sun) * sin(p->incl * M_PI/180.)/v_temp;
+
+  // We want to assert that this pixel has already fulfilled the zeroth order check that there will be emission
+  // @assert (((xprime >= 0.0) & (vb_max >= 0.0)) | ((xprime <= 0.0) & (vb_min <= 0.0))) "Pixel $xprime, $yprime, will have no emission."
+
+  // There exists a vb=0 velocity, so the best we can say is that z1start and z2end starts and end at (rmax, -rmax),
+  // respectively
+  bool overlap = (vb_min <= 0.0) && (vb_max >= 0.0);
+
+  // The velocity where the ray intersects the plane of the sky (z^\prime = 0) exists between vb_min and vb_max
+  // This means that the two separate bounding regions merge into one.
+  bool overlap_crit = (vb_crit > vb_min) && (vb_crit < vb_max);
+
+  double xxyy = xprime*xprime + yprime*yprime;
+  double t1 = xprime * sqrt(G * p->M_star * M_sun) * sin(p->incl * M_PI/180.);
+
+  if ((xprime >= 0.0) & (vb_max >= 0.0))
+  {
+    if (overlap)
+    {
+      myZps.z1start = RMAX_interp * AU;
+      myZps.z2end = -RMAX_interp * AU;
+    }
+    else if (vb_min >= 0.0)
+    {
+      myZps.z1start = sqrt(ftp(t1, vb_min) - xxyy);
+      myZps.z2end = -sqrt(ftp(t1, vb_min) - xxyy);
+    }
+    if (overlap_crit)
+    {
+      // There exists a vb within the range of vbs which yields zprime = 0, so the two regions merge.
+      myZps.z1end = 0.0;
+      myZps.z2start = 0.0;
+      myZps.merge = true;
+      return myZps;
+    }
+    else
+    {
+      myZps.z1end = sqrt(ftp(t1, vb_max) - xxyy);
+      myZps.z2start = -sqrt(ftp(t1, vb_max) - xxyy);
+    }
+  }
+  else if ((xprime <= 0.0) & (vb_min <= 0.0))
+  {
+    if (overlap)
+    {
+      myZps.z1start = RMAX_interp * AU;
+      myZps.z2end = -RMAX_interp * AU;
+    }
+    else if (vb_max <= 0.0)
+    {
+      myZps.z1start = sqrt(ftp(t1, vb_max) - xxyy);
+      myZps.z2end = -sqrt(ftp(t1, vb_max) - xxyy);
+    }
+
+    if (overlap_crit)
+    {
+      // There exists a vb within the range of vbs which yields zprime = 0, so the two regions merge.
+      myZps.z1end = 0.0;
+      myZps.z2start = 0.0;
+      myZps.merge = true;
+      return myZps;
+    }
+    else
+    {
+      myZps.z1end = sqrt(ftp(t1, vb_min) - xxyy);
+      myZps.z2start = -sqrt(ftp(t1, vb_min) - xxyy);
+    }
+  }
+  // Return all 4, initialized.
+  myZps.merge = false;
+  return myZps;
+}
 
 
 // ****************************************
-// * Trace functions
+// * Ray-tracing functions
 // ****************************************
-
-
 
 // Adaptive stepper using Midpoint Method. https://en.wikipedia.org/wiki/Midpoint_method
-// void integrate_tau(double zstart, double zend, double v0, struct pars * p, struct grid * g, struct geoPrecalc gpre, double h_tau, double tau_start, double intensity_start, double max_ds, double * end_tau, double * end_I)
-// {
-//
-//   // @assert max_ds < 0 "max_ds must be a negative number, since the ray is traced along -z"
-//
-//   double tot_intensity = intensity_start;
-//   double zp = zstart;
-//   double tau = tau_start;
-//
-//   // Write in coordinate conversions for querying alpha and sfunc
-//   struct coords myCoords = get_coords(zp, gpre);
-//
-//
-//   // Calculate Delta v at this position
-//   double Deltav = v0 * 1.e5 - myCoords.vlos;
-//
-//   // Look up RT quantities from nearest-neighbor interp.
-//   struct interp_point point = interp_grid(myCoords.rcyl, myCoords.z, g);
-//
-//   // Evaluate alpha at current zstart position
-//   double alpha = point.Upsilon * exp(-Deltav*Deltav/point.DeltaV2);
-//
-//   // Midpoint
-//   double zp2 = 0.0;
-//   double h;
-//
-//   double expOld = exp(-tau);
-//   double expNew = exp(-tau);
-//
-//   while ((tau < TAU_THRESH) && (zp > zend))
-//   {
-//       // Based upon current alpha value, calculate how much of a dz we would need to get dz * alpha = h_tau
-//       // Because these are negative numbers, the smaller step is actually the maximum (closer to 0)
-//       h = fmax(-h_tau / alpha, max_ds);
-//
-//       // Midpoint step position
-//       zp2 = zp + 0.5 * h;
-//
-//       // Get the necessary coordinates for querying the grid.
-//       myCoords = get_coords(zp2, gpre);
-//
-//       // Calculate Delta v at this position
-//       Deltav = v0 * 1.e5 - myCoords.vlos;
-//
-//       // Look up RT quantities from nearest-neighbor interp, evaluated at the midpoint
-//       point = interp_grid(myCoords.rcyl, myCoords.z, g);
-//
-//       alpha = point.Upsilon * exp(-Deltav*Deltav/point.DeltaV2); // Calculate alpha at new midpoint location
-//
-//       zp += h; // Update current z position
-//
-//       // Use the midpoint formula to integrate tau
-//       // dtau = - alpha * dzp
-//       // tau_(n+1) = tau_n + dzp * alpha(zp_n + h/2)
-//       // since we have a simple ODE, explicit and implicit techniques are the same.
-//       tau += -h * alpha; // Update tau, remembering h is negative
-//
-//       expNew = exp(-tau); // Update exp
-//
-//       // Use the formal solution to calculate the emission coming from this cell, assuming the source function
-//       // is constant over the cell
-//       tot_intensity += point.S_nu * (expOld - expNew);
-//
-//       expOld = expNew; //replace expOld with updated tau
-//   }
-//
-//   // Update the return values using pointers.
-//   *end_tau = tau;
-//   *end_I = tot_intensity;
-//
-// }
-//
+__device__ void integrate_tau(double zstart, double zend, double v0, struct pars * p, struct geoPrecalc gpre, double h_tau, double tau_start, double intensity_start, double max_ds, double * end_tau, double * end_I)
+{
+
+  // @assert max_ds < 0 "max_ds must be a negative number, since the ray is traced along -z"
+
+  double tot_intensity = intensity_start;
+  double zp = zstart;
+  double tau = tau_start;
+
+  // Write in coordinate conversions for querying alpha and sfunc
+  struct coords myCoords = get_coords(zp, gpre);
+
+  // Calculate Delta v at this position
+  double Deltav = v0 * 1.e5 - myCoords.vlos;
+
+  // Look up RT quantities from nearest-neighbor interp.
+  float4 point = interp_grid(myCoords.rcyl, myCoords.z);
+
+  // Evaluate alpha at current zstart position
+  // point.x = DeltaV2
+  // point.z = Upsilon
+  double alpha = point.z * exp(-Deltav*Deltav/point.x);
+
+  // Midpoint
+  double zp2 = 0.0;
+  double h;
+
+  double expOld = exp(-tau);
+  double expNew = exp(-tau);
+
+  while ((tau < TAU_THRESH) && (zp > zend))
+  {
+      // Based upon current alpha value, calculate how much of a dz we would need to get dz * alpha = h_tau
+      // Because these are negative numbers, the smaller step is actually the maximum (closer to 0)
+      h = fmax(-h_tau / alpha, max_ds);
+
+      // Midpoint step position
+      zp2 = zp + 0.5 * h;
+
+      // Get the necessary coordinates for querying the grid.
+      myCoords = get_coords(zp2, gpre);
+
+      // Calculate Delta v at this position
+      Deltav = v0 * 1.e5 - myCoords.vlos;
+
+      // Look up RT quantities from nearest-neighbor interp, evaluated at the midpoint
+      point = interp_grid(myCoords.rcyl, myCoords.z);
+
+      // point.x = DeltaV2
+      // point.y = S_nu
+      // point.z = Upsilon_nu
+      alpha = point.z * exp(-Deltav*Deltav/point.x); // Calculate alpha at new midpoint location
+
+      zp += h; // Update current z position
+
+      // Use the midpoint formula to integrate tau
+      // dtau = - alpha * dzp
+      // tau_(n+1) = tau_n + dzp * alpha(zp_n + h/2)
+      // since we have a simple ODE, explicit and implicit techniques are the same.
+      tau += -h * alpha; // Update tau, remembering h is negative
+
+      expNew = exp(-tau); // Update exp
+
+      // Use the formal solution to calculate the emission coming from this cell, assuming the source function
+      // is constant over the cell
+      // S_nu = point.y
+      tot_intensity += point.y * (expOld - expNew);
+
+      expOld = expNew; //replace expOld with updated tau
+  }
+
+  // Update the return values using pointers.
+  *end_tau = tau;
+  *end_I = tot_intensity;
+}
+
 
 // v0 is the central velocity of the channel, relative to the disk systemic velocity
 // Do the pre-calculations necessary to call integrate_tau
-// void trace_pixel(double xprime, double yprime, double v0, struct pars * p, double DeltaVmax, struct grid * g, double * end_tau, double * end_I)
-// {
-//
-//   double rmax = 700.0 * AU;
-//
-//   // Based on the radius of the midplane crossing, estimate a safe dtmax
-//   // Assume that this has a floor of 0.2 AU.
-//   double rcyl_min = fabs(xprime) + 0.2 * AU;
-//
-//   // we want the zprime that corresponds to the midplane crossing
-//   double zprime_midplane = -tan(p->incl * deg) * yprime;
-//
-//   // Calculate the rcyl_mid here
-//   // Corresponds to r_cyl_mid, 0.0
-//   double t1 = (cos(p->incl * deg) * yprime + sin(p->incl * deg) * zprime_midplane);
-//   double rcyl_mid = sqrt(xprime*xprime + t1 * t1);
-//
-//   // Get amplitude at midplane crossing
-//   // Get scale height at rcyl_min (will be an underestimate)
-//   double H_rcyl_min = Hp_pars(rcyl_min, p);
-//   double H_rcyl_mid = Hp_pars(rcyl_mid, p);
-//
-//   double sigma_Upsilon = 0.5 * (H_rcyl_min + H_rcyl_mid)  / cos(p->incl * deg);
-//   double max_ds = -sigma_Upsilon / 2.0;
-//
-//   // Calculate the bounding positions for emission
-//   // If it's two, just trace it.
-//   // If it's four, break it up into two integrals.
-//   struct zps myZps =  get_bounding_zps(xprime, yprime, p, v0, DeltaVmax, rmax);
-//
-//   struct geoPrecalc gpre = get_geoPrecalc(xprime, yprime, p);
-//
-//   if (myZps.merge)
-//   {
-//     integrate_tau(myZps.z1start, myZps.z2end, v0, p, g, gpre, 0.1, 0.0, 0.0, max_ds, end_tau, end_I);
-//   }
-//   else
-//   {
-//     integrate_tau(myZps.z1start, myZps.z1end, v0, p, g, gpre, 0.1, 0.0, 0.0, max_ds, end_tau, end_I);
-//     if (*end_tau < TAU_THRESH)
-//     {
-//       integrate_tau(myZps.z2start, myZps.z2end, v0, p, g, gpre, 0.1, *end_tau, *end_I, max_ds, end_tau, end_I);
-//     }
-//   }
-// }
+__device__ void trace_pixel(double xprime, double yprime, double v0, struct pars * p, double DeltaVmax, double * end_tau, double * end_I)
+{
 
+  // Based on the radius of the midplane crossing, estimate a safe dtmax
+  // Assume that this has a floor of 0.2 AU.
+  double rcyl_min = fabs(xprime) + 0.2 * AU;
 
+  // we want the zprime that corresponds to the midplane crossing
+  double zprime_midplane = -tan(p->incl * M_PI/180.) * yprime;
 
-// Define constants as constant memory.
-// __constant__ double or something
-// __device__ double
+  // Calculate the rcyl_mid here
+  // Corresponds to r_cyl_mid, 0.0
+  double t1 = (cos(p->incl * M_PI/180.) * yprime + sin(p->incl * M_PI/180.) * zprime_midplane);
+  double rcyl_mid = sqrt(xprime*xprime + t1 * t1);
+
+  // Get amplitude at midplane crossing
+  // Get scale height at rcyl_min (will be an underestimate)
+  double H_rcyl_min = Hp_pars(rcyl_min, p);
+  double H_rcyl_mid = Hp_pars(rcyl_mid, p);
+
+  double sigma_Upsilon = 0.5 * (H_rcyl_min + H_rcyl_mid)  / cos(p->incl * M_PI/180.);
+  double max_ds = -sigma_Upsilon / 2.0;
+
+  // Calculate the bounding positions for emission
+  // If it's two, just trace it.
+  // If it's four, break it up into two integrals.
+  struct zps myZps =  get_bounding_zps(xprime, yprime, p, v0, DeltaVmax);
+
+  struct geoPrecalc gpre = get_geoPrecalc(xprime, yprime, p);
+
+  if (myZps.merge)
+  {
+    integrate_tau(myZps.z1start, myZps.z2end, v0, p, gpre, 0.1, 0.0, 0.0, max_ds, end_tau, end_I);
+  }
+  else
+  {
+    integrate_tau(myZps.z1start, myZps.z1end, v0, p, gpre, 0.1, 0.0, 0.0, max_ds, end_tau, end_I);
+    if (*end_tau < TAU_THRESH)
+    {
+      integrate_tau(myZps.z2start, myZps.z2end, v0, p, gpre, 0.1, *end_tau, *end_I, max_ds, end_tau, end_I);
+    }
+  }
+}
 
 
 // 1 grid of N blocks, each with M threads
@@ -828,7 +715,7 @@ __device__ float4 interp_grid(double r, double z)
   return ans;
 }
 
-__global__ void tracePixel(bool *mask, double *img, int numElements) // img is the DEVICE global memory
+__global__ void tracePixel(bool *mask, double *tau, double *img, int numElements) // img is the DEVICE global memory
 {
 
     int i_vel = blockIdx.x;
@@ -844,28 +731,32 @@ __global__ void tracePixel(bool *mask, double *img, int numElements) // img is t
     // determine whether the pixel should be traced
     if (index < numElements)
     {
-
       // calculate xprime and yprime from the image dimensions
-      double xprime = 2 * (i_col - (NPIX / 2)) * RMAX * AU/ NPIX;
-      double yprime = 2 * (i_row - (NPIX / 2)) * RMAX * AU / NPIX;
+      double xprime = 2 * (i_col - (NPIX / 2)) * RMAX_image * AU/ NPIX;
+      double yprime = 2 * (i_row - (NPIX / 2)) * RMAX_image * AU / NPIX;
       double v0 = dVels[i_vel];
-
-      // img[index] = dVels[i_vel]; //dPars.M_star;
 
       // calculate the minimum r_cyl along this ray
       double rcyl_min = fabs(xprime);
 
       // get the maxmimum DeltaV2 along this ray.
       float4 ans = interp_grid(rcyl_min, 0.0);
-      // printf("i_col: %d i_row: %d .x: %f .y:%f .z:%f .w:%f \n", i_col, i_row, ans.x, ans.y, ans.z, ans.w);
       double DeltaVmax = sqrt(ans.x) * 1.0e-5; // km/s
-      // printf("xprime: %f DeltaV2Max: %f, S_nu: %f, Upsilon: %f,\n", xprime/AU, DeltaV2Max, ans.y, ans.z);
 
-      // float ans = tex2D(texRef, i_col, i_row);
-      // printf("numElements: %d, i_col: %d i_row: %d ans: %f \n", numElements, i_col, i_row, ans);
-      mask[index] = verify_pixel(xprime, yprime, &dPars, v0, DeltaVmax);
-      // img[index] = verify_pixel(xprime, yprime, &dPars, v0, DeltaVmax);
-      // Load from the texture using tex2D(texRef, x, y);
+      bool trace = verify_pixel(xprime, yprime, &dPars, v0, DeltaVmax);
+      mask[index] = trace;
+
+      if (trace)
+      {
+        // Call the ray-tracing routine and store the results in the tau and image arrays.
+        trace_pixel(xprime, yprime, v0, &dPars, DeltaVmax, &tau[index], &img[index]);
+      }
+      else
+      {
+        // The pixel will not be traced, so set tau and intensity to 0.0
+        tau[index] = 0.0;
+        img[index] = 0.0;
+      }
     }
 
 }
@@ -899,7 +790,6 @@ int main(void)
   double vel_end = 2.5;
   double dvel = (vel_end - vel_start) / (NVEL - 1.0);
   // Create an array of velocities linearly spaced from vel_start to vel_end
-  // img.pVel = malloc(n_vel * sizeof(double));
   for (int i = 0; i < NVEL; i++)
   {
     hVels[i] = vel_start + dvel * i;
@@ -912,73 +802,66 @@ int main(void)
     exit(EXIT_FAILURE);
   }
 
+  // BEGIN TEXTURE SETUP -------------------------
+
   // Set up the texture memory for the grid interpolator.
-  // this is the float4 type, right?
+  // the (32,32,32,32) means we are using a CUDA float4 vector type
   cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 32, 32, 32, cudaChannelFormatKindFloat);
-  // cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);
 
   // allocate the 2D array to form the texture
   cudaArray* cuArray;
   cudaMallocArray(&cuArray, &channelDesc, NR, NZ);
 
   // Initialize it with memory from the host
-  float4 h_data[NR][NZ];
+  float4 h_data[NR][NZ]; // array of CUDA 4-vectors
+  double r_grid, z_grid, DV2, S, U;
 
-  double r_grid, z_grid, DV2;
-
+  // Initialize like a row-major image. axis 0 = y, axis 1 = x
   for (int j=0; j<NZ; j++)
   {
     // Since there is a singularity at rcyl = 0 for many of the disk parameterizations, we set the first few
     // columns of the texture < START_COLUMN to be equal to whatever the values are at START_COLUMN
-
     for (int i=0; i<START_COLUMN; i++)
     {
-      // calculate r_grid, z_grid
       r_grid = (START_COLUMN + 0.0)/NR * RMAX_interp * AU;
       z_grid = (j + 0.0)/NZ * ZMAX_interp * AU;
 
       DV2 = DeltaV2(r_grid, z_grid, &hPars, &CO12_21);
+      S = S_nu(r_grid, z_grid, CO12_21.nu_0, &hPars);
+      U = Upsilon_nu(r_grid, z_grid, CO12_21.nu_0, &hPars, &CO12_21);
 
-      h_data[j][i] = make_float4(DV2, 0.0, 0.0, 0.0);
-      // printf("x: %f", h_data[j][i].x);
-      // printf(" y: %f", h_data[j][i].y);
-      // printf(" z: %f", h_data[j][i].z);
-      // printf(" w: %f\n", h_data[j][i].w);
+      h_data[j][i] = make_float4(DV2, S, U, 0.0);
     }
 
     for (int i=START_COLUMN; i<NR; i++)
     {
-      // calculate r_grid, z_grid
       r_grid = (i + 0.0)/NR * RMAX_interp * AU;
       z_grid = (j + 0.0)/NZ * ZMAX_interp * AU;
 
       DV2 = DeltaV2(r_grid, z_grid, &hPars, &CO12_21);
+      S = S_nu(r_grid, z_grid, CO12_21.nu_0, &hPars);
+      U = Upsilon_nu(r_grid, z_grid, CO12_21.nu_0, &hPars, &CO12_21);
 
-      h_data[j][i] = make_float4(DV2, 0.0, 0.0, 0.0);
-      // printf("x: %f", h_data[j][i].x);
-      // printf(" y: %f", h_data[j][i].y);
-      // printf(" z: %f", h_data[j][i].z);
-      // printf(" w: %f\n", h_data[j][i].w);
+      h_data[j][i] = make_float4(DV2, S, U, 0.0);
     }
-
   }
 
 
-  // cudaMemcpytoArray(dArray, wOffset, hOffset, source, size, cudaMemcpyHosttoDivec)
+  // copy the array we just initialized to the device
+  // call signature cudaMemcpytoArray(dArray, wOffset, hOffset, source, size, cudaMemcpyHostToDevice)
   cudaMemcpyToArray(cuArray, 0, 0, h_data,  NR * NZ * sizeof(float4), cudaMemcpyHostToDevice);
-  // cudaMemcpyToArray(cuArray, 0, 0, h_data,  NR * NZ * sizeof(float), cudaMemcpyHostToDevice);
 
   // texture reference parameters
-  texRef.addressMode[0] = cudaAddressModeClamp; // clamp to (0.0, 1.0 - 1/N). cudaAddressModeBorder (send to 0.0 outside)
+  texRef.addressMode[0] = cudaAddressModeClamp; // clamp to (0.0, 1.0 - 1/N). OR cudaAddressModeBorder (0.0 outside)
   texRef.addressMode[1] = cudaAddressModeClamp;
   texRef.filterMode = cudaFilterModeLinear;     // nearest neighbor: cudaFilterModePoint. cudaFilterModeLinear
   texRef.normalized = true; // true
 
-  // Bind the array to the texture reference
-  cudaBindTextureToArray(texRef, cuArray, channelDesc);
+  cudaBindTextureToArray(texRef, cuArray, channelDesc); // Bind the array to the texture reference
 
+  // END TEXTURE SETUP -------------------------
 
-  // Determine the size of the image, and create memory to hold it, both on the host and on the device.
+  // Determine the size of the mask, image, and create memory to hold it on both the host and the device.
   int numElements = NVEL * NPIX * NPIX;
   size_t size_mask = numElements * sizeof(bool);
   size_t size_image = numElements * sizeof(double);
@@ -1000,6 +883,26 @@ int main(void)
   if (err != cudaSuccess)
   {
     fprintf(stderr, "Failed to allocate memory for the mask on the device (error code %s)!\n", cudaGetErrorString(err));
+    exit(EXIT_FAILURE);
+  }
+
+  // HOST tau memory allocation
+  double *h_tau = (double *)malloc(size_image);
+
+  // Verify that allocations succeeded
+  if (h_tau == NULL)
+  {
+    fprintf(stderr, "Failed to allocate memory for the tau on the host!\n");
+    exit(EXIT_FAILURE);
+  }
+
+  // DEVICE tau memory allocation
+  double *d_tau = NULL;
+  err = cudaMalloc((void **)&d_tau, size_image);
+
+  if (err != cudaSuccess)
+  {
+    fprintf(stderr, "Failed to allocate memory for the tau on the device (error code %s)!\n", cudaGetErrorString(err));
     exit(EXIT_FAILURE);
   }
 
@@ -1030,7 +933,7 @@ int main(void)
   dim3 numBlocks(NVEL, NPIX);
   printf("CUDA kernel launch with a grid %d x %d (%d blocks) of %d threads\n", numBlocks.x, numBlocks.y, numBlocks.x * numBlocks.y, threadsPerBlock);
   printf("numElements %d\n", numElements);
-  tracePixel<<<numBlocks, threadsPerBlock>>>(d_mask, d_img, numElements);
+  tracePixel<<<numBlocks, threadsPerBlock>>>(d_mask, d_tau, d_img, numElements);
   err = cudaGetLastError();
 
   if (err != cudaSuccess)
@@ -1040,7 +943,6 @@ int main(void)
   }
 
   // Copy the resulting mask in device memory to the host memory.
-  printf("Copy mask data from the CUDA device to the host memory\n");
   // This call requires the kernels to have finished executing, so it's OK.
   err = cudaMemcpy(h_mask, d_mask, size_mask, cudaMemcpyDeviceToHost);
 
@@ -1050,9 +952,17 @@ int main(void)
     exit(EXIT_FAILURE);
   }
 
+  // Copy the resulting tau in device memory to the host memory.
+  // This call requires the kernels to have finished executing, so it's OK.
+  err = cudaMemcpy(h_tau, d_tau, size_image, cudaMemcpyDeviceToHost);
+
+  if (err != cudaSuccess)
+  {
+    fprintf(stderr, "Failed to copy tau from device to host (error code %s)!\n", cudaGetErrorString(err));
+    exit(EXIT_FAILURE);
+  }
 
   // Copy the resulting image in device memory to the host memory.
-  printf("Copy image data from the CUDA device to the host memory\n");
   // This call requires the kernels to have finished executing, so it's OK.
   err = cudaMemcpy(h_img, d_img, size_image, cudaMemcpyDeviceToHost);
 
@@ -1063,16 +973,10 @@ int main(void)
   }
 
   // Save the results to disk using HDF5 files.
-  // for (int i = 0; i < numElements; ++i)
-  // {
-  //     printf("i=%d, h_img[%d]=%f\n", i, i, h_img[i]);
-  // }
-
-  // Create the HDF5 file, overwrite if exists
   hid_t file_id;
 
-  // We're storing a 1D array as the frequencies
-  // hsize_t dims_vel[1] = {NVEL};
+  // We're storing a 1D array as the velocities
+  hsize_t dims_vel[1] = {NVEL};
   // We're storing a 3D array as the image
   hsize_t dims_img[3] = {NVEL, NPIX, NPIX};
 
@@ -1080,30 +984,42 @@ int main(void)
   file_id = H5Fcreate("img.h5", H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
 
   // Create the double datasets within the file using the H5 Lite interface
-  // H5LTmake_dataset(file_id, "/vels", 1, dims_vel, H5T_NATIVE_DOUBLE, img->pVel);
+  H5LTmake_dataset(file_id, "/vels", 1, dims_vel, H5T_NATIVE_DOUBLE, hVels);
   H5LTmake_dataset(file_id, "/mask", 3, dims_img, H5T_NATIVE_CHAR, h_mask);
   // H5LTmake_dataset(file_id, "/mask", 3, dims_img, H5T_NATIVE_DOUBLE, h_mask);
-  // H5LTmake_dataset(file_id, "/tau", 3, dims_img, H5T_NATIVE_DOUBLE, img->pTau);
+  H5LTmake_dataset(file_id, "/tau", 3, dims_img, H5T_NATIVE_DOUBLE, h_tau);
   H5LTmake_dataset(file_id, "/img", 3, dims_img, H5T_NATIVE_DOUBLE, h_img);
 
   // Close up
   H5Fclose (file_id);
 
-
   // Release the texture memory
   cudaFreeArray(cuArray);
 
-  err = cudaFree(d_img);  // Free device global memory
+  err = cudaFree(d_mask);  // Free device global memory
+  if (err != cudaSuccess)
+  {
+    fprintf(stderr, "Failed to free device mask (error code %s)!\n", cudaGetErrorString(err));
+    exit(EXIT_FAILURE);
+  }
 
+  err = cudaFree(d_tau);  // Free device global memory
+  if (err != cudaSuccess)
+  {
+    fprintf(stderr, "Failed to free device tau (error code %s)!\n", cudaGetErrorString(err));
+    exit(EXIT_FAILURE);
+  }
+
+  err = cudaFree(d_img);  // Free device global memory
   if (err != cudaSuccess)
   {
     fprintf(stderr, "Failed to free device image (error code %s)!\n", cudaGetErrorString(err));
     exit(EXIT_FAILURE);
   }
 
-
-
-  free(h_img); // Free host memory
+  free(h_mask); // Free host memory
+  free(h_tau);
+  free(h_img);
 
   return 0;
 }
