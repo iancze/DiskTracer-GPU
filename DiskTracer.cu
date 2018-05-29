@@ -4,7 +4,7 @@
 // CUDA math library
 #include "math.h"
 
-// Necessary for writing the grid properties array to disk
+// Necessary for writing the images to disk
 #include <hdf5.h>
 #include <hdf5_hl.h>
 
@@ -55,12 +55,8 @@ struct pars{
     double gamma; // surface density gradient exponent
     double Sigma_c; // [g/cm^2] surface density at characteristic radius
     double ksi; // [cm s^{-1}] microturbulence
-    double dpc; //[pc] distance to system
     double incl; // [degrees] inclination 0 deg = face on, 90 = edge on.
-    double PA; // [degrees] position angle (East of North)
     double vel; // [km/s] systemic velocity (positive is redshift/receeding)
-    double mu_RA; // [arcsec] central offset in RA
-    double mu_DEC; //[arcsec] central offset in DEC
 };
 
 // For pre-caching geometry calculations along a ray
@@ -173,13 +169,11 @@ void init_constants(void)
   init_molecule(&CO13_32, chi_13CO, 55101.01e6, 1.1046e-19, m_13CO, 330.58796530e6, 2, 15.8662);
   init_molecule(&CO18_21, chi_C18O, 54891.42e6, 1.1079e-19, m_C18O, 219.56035410e6, 1, 5.2686);
   init_molecule(&CO18_32, chi_C18O, 54891.42e6, 1.1079e-19, m_C18O, 329.33055250e6, 2, 15.8059);
-
 }
 
 // ****************************************
 // * model functions
 // ****************************************
-
 // Assume all inputs to these functions are in CGS units and in *cylindrical* coordinates.
 
 // Calculate temperature in cylindrical coordinates.
@@ -276,7 +270,6 @@ double DeltaV2(double r, double z, struct pars * p, struct molecule * m)
 // ****************************************
 // * geometry functions
 // ****************************************
-
 
 // Precalculate the quantities necessary to make repeated calls to `get_r_cyl`, `get_z`, and `get_vlos` efficient.
 __device__ struct geoPrecalc get_geoPrecalc(double xprime, double yprime, struct pars * p)
@@ -773,7 +766,7 @@ int main(void)
   cudaError_t err = cudaSuccess;
 
   // Create parameters on host as constant memory
-  struct pars hPars = {.M_star=1.75, .r_c=45.0, .T_10=115., .q=0.63, .gamma=1.0, .Sigma_c=7.0, .ksi=0.14, .dpc=73.0, .incl=45.0, .PA=0.0, .vel=0.0, .mu_RA=0.0, .mu_DEC=0.0};
+  struct pars hPars = {.M_star=1.75, .r_c=45.0, .T_10=115., .q=0.63, .gamma=1.0, .Sigma_c=7.0, .ksi=0.14, .incl=45.0, .vel=0.0};
 
   // Copy parameters to constant memory on the device
   err = cudaMemcpyToSymbol(dPars, &hPars, sizeof(pars));
@@ -925,7 +918,6 @@ int main(void)
     fprintf(stderr, "Failed to allocate memory for the image on the device (error code %s)!\n", cudaGetErrorString(err));
     exit(EXIT_FAILURE);
   }
-
 
   // Launch the Vector Add CUDA Kernel
   int threadsPerBlock = NPIX;
