@@ -11,6 +11,10 @@
 // For the CUDA runtime routines (prefixed with "cuda_")
 #include <cuda_runtime.h>
 
+
+// for profiling
+#include <cuda_profiler_api.h>
+
 // Set up for the problem
 // Number of pix per dimension
 #define NPIX 256
@@ -725,8 +729,8 @@ __global__ void tracePixel(bool *mask, double *tau, double *img, int numElements
     if (index < numElements)
     {
       // calculate xprime and yprime from the image dimensions
-      double xprime = 2 * (i_col - (NPIX / 2)) * RMAX_image * AU/ NPIX;
-      double yprime = 2 * (i_row - (NPIX / 2)) * RMAX_image * AU / NPIX;
+      double xprime = 2 * (i_col - (NPIX / 2.0)) * RMAX_image * AU/ NPIX;
+      double yprime = 2 * (i_row - (NPIX / 2.0)) * RMAX_image * AU / NPIX;
       double v0 = dVels[i_vel];
 
       // calculate the minimum r_cyl along this ray
@@ -743,6 +747,8 @@ __global__ void tracePixel(bool *mask, double *tau, double *img, int numElements
       {
         // Call the ray-tracing routine and store the results in the tau and image arrays.
         trace_pixel(xprime, yprime, v0, &dPars, DeltaVmax, &tau[index], &img[index]);
+        // tau[index] = 0.0;
+        // img[index] = 0.0;
       }
       else
       {
@@ -758,6 +764,8 @@ __global__ void tracePixel(bool *mask, double *tau, double *img, int numElements
 // Main routine on the HOST
 int main(void)
 {
+
+  cudaProfilerStart();
 
   // Calculate the appropriate constants
   init_constants();
@@ -978,7 +986,6 @@ int main(void)
   // Create the double datasets within the file using the H5 Lite interface
   H5LTmake_dataset(file_id, "/vels", 1, dims_vel, H5T_NATIVE_DOUBLE, hVels);
   H5LTmake_dataset(file_id, "/mask", 3, dims_img, H5T_NATIVE_CHAR, h_mask);
-  // H5LTmake_dataset(file_id, "/mask", 3, dims_img, H5T_NATIVE_DOUBLE, h_mask);
   H5LTmake_dataset(file_id, "/tau", 3, dims_img, H5T_NATIVE_DOUBLE, h_tau);
   H5LTmake_dataset(file_id, "/img", 3, dims_img, H5T_NATIVE_DOUBLE, h_img);
 
@@ -1013,5 +1020,8 @@ int main(void)
   free(h_tau);
   free(h_img);
 
+  cudaProfilerStop();
+
   return 0;
+
 }
